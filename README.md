@@ -155,11 +155,12 @@ environment that hosts an InfluxDB 3 deployment: topology, workloads, Services
 and endpoints, storage, Helm releases, ConfigMaps and secret key names, events,
 and on-demand log tails.
 
-![Topology view: nodes, InfluxDB 3 workloads, and Services](docs/images/console-topology.png)
+![Topology view: a node picker and the pods that node runs](docs/images/console-topology.png)
 
-*Topology view. Nodes, database workloads, and Services are laid out left to
-right; edges are derived from pod scheduling and Service selectors. Each Service
-card shows its type, its ports, and how many endpoints are ready.*
+*Topology view. Every node in the cluster is listed in the picker on the left;
+choosing one lists everything running on it - pod, owning workload, component,
+and readiness - with `kube-system` omitted from the list and reported as a
+count.*
 
 ```sh
 kubectl db3 webui

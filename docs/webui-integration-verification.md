@@ -25,11 +25,13 @@ second dashboard or replace the support capture implementation.
 - Configuration: sequential single-job processing, at most 16 namespaces,
   500 combined ConfigMap/Secret metadata rows and 1 MiB serialized masked rows.
   Truncated outcomes preserve bounded data AND propagate partial errors.
-- Resource arrays: 500 entries; backend selector comparisons: 50,000. Topology:
-  80 inputs per column/pod set, 500 edges, 20,000 relationship/selector work
-  budget. Visible partial findings/notices; owner kind/name + namespace only,
-  never inferred ownership from same-role labels. Missing querier observations
-  are explicitly uncertain rather than assertions that SQL must fail.
+- Resource arrays: 500 entries per type; backend selector comparisons: 50,000.
+  Topology: every collected node with no separate node cap, pods bucketed by node
+  from the full collected set, paged rather than sliced, with `kube-system`
+  omitted and counted and unscheduled pods reported separately. Visible partial
+  findings/notices; owner kind/name + namespace only, never inferred ownership
+  from same-role labels. Missing querier observations are explicitly uncertain
+  rather than assertions that SQL must fail.
 - Light success foreground darkened after a measured 4.35:1 regression;
   narrow key/value layouts now stack, theme/menu touch targets are 44px.
 
