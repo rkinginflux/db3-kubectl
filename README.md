@@ -1,12 +1,14 @@
-# kubectl db3
+# db3-kubectl
 
-Local Rust kubectl plugin for InfluxDB 3 Enterprise. The compiled plugin requires no Python runtime. Nothing is uploaded, and the collector does not change database configuration or Kubernetes resources.
+Independent, community-maintained Rust kubectl plugin for use with the InfluxDB® 3 Enterprise database.[^trademark] The compiled plugin requires no Python runtime. Nothing is uploaded, and the collector does not change database configuration or Kubernetes resources.
+
+This project is not an official product of InfluxData. See [trademark usage and review notes](TRADEMARKS.md) for attribution, contributor guidance, and permission-review limitations.
 
 ## Requirements
 
 - kubectl on the administrator's PATH and a compiled `kubectl-db3` binary for your platform (Linux/macOS). Rust/Cargo is needed to build from source; Python 3 is needed only for the optional compatibility-test harness.
 - For JSON support collection: a kubeconfig with permission to create `pods/exec` sessions, `sh` and `influxdb3` on PATH in the selected container, and a server reachable by that container's CLI (normally http://127.0.0.1:8181). The container's host/TLS environment is honored. The plugin does not port-forward or discover credentials.
-- For log collection: permission to list pods and read `pods/log` in the selected namespace. No InfluxDB CLI or admin token is required.
+- For log collection: permission to list pods and read `pods/log` in the selected namespace. No database CLI or admin token is required.
 
 ## Build and enable locally
 
@@ -35,7 +37,7 @@ kubectl db3 support --help
 
 This PATH change affects only the current shell; add it to your shell profile yourself if desired. The executable is `kubectl-db3`; kubectl discovers it as `kubectl db3`. Alternatively, place a symlink to the built executable in a directory already on your PATH, such as `~/.local/bin`.
 
-## Collect InfluxDB 3 role logs
+## Collect database role logs
 
 Collect logs across querier, processor, ingester, and compactor pods:
 
@@ -55,7 +57,7 @@ kubectl db3 support logs ingester -n influxdb3
 kubectl db3 support logs compactor -n influxdb3
 ```
 
-Each role command discovers all pods matching `app.kubernetes.io/component=ROLE` in the namespace and takes a log snapshot from all containers in each pod. It does not require a pod name, run the InfluxDB CLI, or call `kubectl exec`. The default label is a convention, not a verified fact about your deployment; no pod-name substring matching or fallback to all namespace pods is performed.
+Each role command discovers all pods matching `app.kubernetes.io/component=ROLE` in the namespace and takes a log snapshot from all containers in each pod. It does not require a pod name, run the database CLI, or call `kubectl exec`. The default label is a convention, not a verified fact about your deployment; no pod-name substring matching or fallback to all namespace pods is performed.
 
 If your chart uses a different role label, inspect labels and override the selector:
 
@@ -119,9 +121,9 @@ influxdb3 show license info --format json
 influxdb3 show databases --format json
 ```
 
-When `INFLUXDB3_TOKEN` is nonempty, each command receives `--token "$token"`. This mapping is explicit: the InfluxDB CLI's native environment variable can differ (`INFLUXDB3_AUTH_TOKEN` in the local Enterprise source), so simply forwarding `INFLUXDB3_TOKEN` would not suffice.
+When `INFLUXDB3_TOKEN` is nonempty, each command receives `--token "$token"`. This mapping is explicit: the database CLI's native environment variable can differ (`INFLUXDB3_AUTH_TOKEN` in the local Enterprise source), so simply forwarding `INFLUXDB3_TOKEN` would not suffice.
 
-The token travels over kubectl exec stdin, not in the local kubectl command arguments or the Kubernetes exec command URL. The Rust implementation prepares stdin in an anonymous, owner-only temporary file to avoid blocked pipe writes; credential bytes can therefore touch local temporary storage until that handle closes. Captured stdout/stderr are also temporarily file-backed before being read for redaction. The token is not written intentionally to the bundle; exact plaintext and JSON-escaped occurrences are redacted from captured command output. However, the remote InfluxDB process receives `--token`, so privileged observers inside the pod can inspect its arguments. A privileged process on the administrator's machine can also inspect the exported environment. This is not a guarantee against all credential disclosure or an exhaustive sanitizer of server output. With no plugin token, no `--token` argument is added; the container CLI's own authentication environment/configuration still applies.
+The token travels over kubectl exec stdin, not in the local kubectl command arguments or the Kubernetes exec command URL. The Rust implementation prepares stdin in an anonymous, owner-only temporary file to avoid blocked pipe writes; credential bytes can therefore touch local temporary storage until that handle closes. Captured stdout/stderr are also temporarily file-backed before being read for redaction. The token is not written intentionally to the bundle; exact plaintext and JSON-escaped occurrences are redacted from captured command output. However, the remote database CLI process receives `--token`, so privileged observers inside the pod can inspect its arguments. A privileged process on the administrator's machine can also inspect the exported environment. This is not a guarantee against all credential disclosure or an exhaustive sanitizer of server output. With no plugin token, no `--token` argument is added; the container CLI's own authentication environment/configuration still applies.
 
 Do not paste real tokens into issue reports. Review all bundle contents before sharing: node names, database names, license information, and diagnostics can be sensitive. No automatic upload occurs.
 
@@ -151,6 +153,8 @@ cargo build --locked --release
 DB3_BINARY="$PWD/target/release/kubectl-db3" python3 -m unittest discover -s tests -v
 ```
 
-Rust tests cover native behavior. The retained Python black-box compatibility suite invokes the compiled binary directly; Python is test tooling only. Without DB3_BINARY it tests the project-root executable. Tests use temporary executable kubectl/InfluxDB substitutes and never contact a cluster. They cover collection, command construction, token transport/redaction, actual remote-shell execution against a substitute CLI, partial failures, invalid JSON, timeout, private permissions, target configuration, and output preservation. Real kubectl plugin dispatch can also be checked safely with `kubectl db3 support --help`.
+Rust tests cover native behavior. The retained Python black-box compatibility suite invokes the compiled binary directly; Python is test tooling only. Without DB3_BINARY it tests the project-root executable. Tests use temporary executable kubectl/database-CLI substitutes and never contact a cluster. They cover collection, command construction, token transport/redaction, actual remote-shell execution against a substitute CLI, partial failures, invalid JSON, timeout, private permissions, target configuration, and output preservation. Real kubectl plugin dispatch can also be checked safely with `kubectl db3 support --help`.
 
 Live-cluster collection is not part of the automated tests. The collector does not upload support data. Source repository: https://github.com/rkinginflux/db3-kubectl.
+
+[^trademark]: InfluxDB® is a trademark registered by InfluxData, which is not affiliated with, and does not endorse, this project.

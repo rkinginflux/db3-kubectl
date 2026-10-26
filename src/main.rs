@@ -24,7 +24,10 @@ const COMMANDS: &[(&str, &[&str])] = &[
 ];
 
 #[derive(Parser)]
-#[command(about = "kubectl plugin for InfluxDB 3 Enterprise support collection")]
+#[command(
+    about = "Independent kubectl plugin for use with InfluxDB® 3 Enterprise databases",
+    after_help = "InfluxDB® is a trademark registered by InfluxData, which is not affiliated with, and does not endorse, this project."
+)]
 struct Cli {
     #[command(subcommand)]
     command: Commands,
