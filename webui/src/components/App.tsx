@@ -9,10 +9,11 @@ import { HelmView } from "./HelmView";
 import { KubernetesView } from "./KubernetesView";
 import { LogsView } from "./LogsView";
 import { Overview } from "./Overview";
+import { QueryView } from "./QueryView";
 import { Topology } from "./Topology";
 import type { Snapshot } from "../types";
 
-type ViewKey = "overview" | "topology" | "db3" | "kubernetes" | "helm" | "config" | "events" | "logs";
+type ViewKey = "overview" | "topology" | "db3" | "kubernetes" | "helm" | "config" | "events" | "logs" | "query";
 
 interface NavItem {
   key: ViewKey;
@@ -30,6 +31,7 @@ const NAV: NavItem[] = [
   { key: "config", label: "Config & secrets", icon: "▤", group: "Configuration" },
   { key: "events", label: "Events", icon: "◔", group: "Operations" },
   { key: "logs", label: "Logs", icon: "≋", group: "Operations" },
+  { key: "query", label: "Query", icon: "⌗", group: "Operations" },
 ];
 
 const TITLES: Record<ViewKey, { title: string; subtitle: string }> = {
@@ -41,6 +43,7 @@ const TITLES: Record<ViewKey, { title: string; subtitle: string }> = {
   config: { title: "Config & secrets", subtitle: "ConfigMaps, opt-in Secret metadata, and masked container environment" },
   events: { title: "Events", subtitle: "Recent warnings and lifecycle messages" },
   logs: { title: "Logs", subtitle: "Bounded on-demand pod log tails" },
+  query: { title: "Query", subtitle: "Read-only SELECT/SHOW terminal (opt in with --query)" },
 };
 
 export function App() {
@@ -260,6 +263,7 @@ export function App() {
           {snapshot && view === "config" && <ConfigView snapshot={snapshot} />}
           {snapshot && view === "events" && <EventsView snapshot={snapshot} />}
           {snapshot && view === "logs" && <LogsView snapshot={snapshot} />}
+          {snapshot && view === "query" && <QueryView snapshot={snapshot} />}
 
           {!loading && !snapshot && !error && <div className="empty">No snapshot available.</div>}
           <footer className="muted" style={{ fontSize: 11, lineHeight: 1.6 }}>

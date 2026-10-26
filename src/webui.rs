@@ -50,6 +50,9 @@ pub struct Webui {
     /// Opt in to Helm releases; Helm may read storage Secrets using your credentials
     #[arg(long, conflicts_with = "no_secrets")]
     helm: bool,
+    /// Opt in to the read-only query terminal (needs INFLUXDB3_TOKEN and pods/exec)
+    #[arg(long)]
+    query: bool,
 }
 
 struct Cache {
@@ -66,6 +69,7 @@ struct State {
     session: String,
     authority: String,
     nonce: String,
+    query_enabled: bool,
     stop: Arc<AtomicBool>,
 }
 
@@ -84,6 +88,10 @@ pub fn run(args: Webui) -> Result<(), Box<dyn std::error::Error>> {
 
     if !is_loopback(&args.address) {
         return Err("--address must be a loopback IP address or localhost".into());
+    }
+    let token = std::env::var("INFLUXDB3_TOKEN").unwrap_or_default();
+    if args.query && token.trim().is_empty() {
+        return Err("--query requires INFLUXDB3_TOKEN in the environment".into());
     }
     let bind = format!("{}:{}", display_host(&args.address), args.port);
     let listener = TcpListener::bind(&bind).map_err(|error| {
@@ -123,6 +131,14 @@ pub fn run(args: Webui) -> Result<(), Box<dyn std::error::Error>> {
             ))
     );
     println!("  Cache    {}s per snapshot", args.refresh);
+    println!(
+        "  Query    {}",
+        if args.query {
+            "read-only SELECT/SHOW terminal enabled"
+        } else {
+            "disabled (enable with --query)"
+        }
+    );
     println!("  Stop     Ctrl+C (the port is released when this process exits)");
     if !is_loopback(&args.address) {
         println!(
@@ -152,7 +168,8 @@ pub fn run(args: Webui) -> Result<(), Box<dyn std::error::Error>> {
             body: None,
         }),
         timeout: args.timeout,
-        token: std::env::var("INFLUXDB3_TOKEN").unwrap_or_default(),
+        token,
+        query_enabled: args.query,
         stop: Arc::clone(&stop),
         session: random_hex()?,
         nonce: random_hex()?,
@@ -310,6 +327,19 @@ fn handle(state: &State, request: Request) {
                 respond(request, api(body, 200));
             }
             Err(error) => respond(request, api(json!({"error": error}).to_string(), 400)),
+        },
+        "/api/query" => match run_query(state, query) {
+            Ok(value) => {
+                let body = if head {
+                    String::new()
+                } else {
+                    value.to_string()
+                };
+                respond(request, api(body, 200));
+            }
+            Err((status, error)) => {
+                respond(request, api(json!({"error": error}).to_string(), status))
+            }
         },
         "/api/manifest" => {
             let body = if head {
@@ -475,6 +505,300 @@ fn logs(state: &State, query: &str) -> Result<Value, String> {
     }))
 }
 
+/// Decoded statement cap. tiny_http rejects request lines over 8 KiB and the
+/// statement travels percent-encoded, so this leaves room for the other params.
+const MAX_STATEMENT: usize = 2048;
+/// Rows handed to the browser; the process output is separately capped at 4 MiB.
+const MAX_ROWS: usize = 1000;
+
+fn run_query(state: &State, query: &str) -> Result<Value, (u16, String)> {
+    if !state.query_enabled {
+        return Err((
+            403,
+            "the query terminal is disabled; restart the console with --query to enable it"
+                .to_owned(),
+        ));
+    }
+    let namespace = param(query, "namespace").unwrap_or_else(|| "default".to_owned());
+    let pod = param(query, "pod").ok_or((400, "pod is required".to_owned()))?;
+    let container = param(query, "container").filter(|value| !value.is_empty());
+    let database = param(query, "database").ok_or((400, "database is required".to_owned()))?;
+    let language = param(query, "language").unwrap_or_else(|| "sql".to_owned());
+    let statement = param(query, "q").ok_or((400, "q is required".to_owned()))?;
+
+    if !matches!(language.as_str(), "sql" | "influxql") {
+        return Err((400, "language must be sql or influxql".to_owned()));
+    }
+    for (label, value) in [
+        ("namespace", Some(&namespace)),
+        ("pod", Some(&pod)),
+        ("container", container.as_ref()),
+        ("database", Some(&database)),
+    ] {
+        if let Some(value) = value {
+            if !valid_name(value) {
+                return Err((400, format!("invalid {label} name")));
+            }
+        }
+    }
+    let statement = read_only_statement(&statement)?;
+
+    let mut argv = Vec::new();
+    if let Some(context) = state
+        .options
+        .context
+        .as_deref()
+        .filter(|value| !value.is_empty())
+    {
+        argv.push("--context".to_owned());
+        argv.push(context.to_owned());
+    }
+    argv.extend([
+        "exec".to_owned(),
+        "-i".to_owned(),
+        pod.clone(),
+        "-n".to_owned(),
+        namespace.clone(),
+    ]);
+    if let Some(container) = container.as_ref() {
+        argv.push("-c".to_owned());
+        argv.push(container.clone());
+    }
+    argv.extend(["--", "sh", "-c", crate::REMOTE, "db3-query"].map(str::to_owned));
+    argv.extend([
+        "query".to_owned(),
+        "--database".to_owned(),
+        database.clone(),
+        "--language".to_owned(),
+        language.clone(),
+        "--format".to_owned(),
+        "json".to_owned(),
+        statement.clone(),
+    ]);
+
+    let captured = crate::webui_process::capture_exec(
+        "kubectl",
+        &argv,
+        &format!("{}\n", state.token),
+        state.timeout,
+        &state.stop,
+    )
+    .map_err(|error| (500, format!("could not run kubectl: {error}")))?;
+
+    let stdout = crate::redact(&captured.stdout, &state.token);
+    let stderr = crate::redact(captured.stderr.trim(), &state.token);
+
+    let mut rows: Vec<Value> = Vec::new();
+    let mut truncated = false;
+    if captured.error.is_none() {
+        match serde_json::from_str::<Value>(stdout.trim()) {
+            Ok(Value::Array(items)) => {
+                truncated = items.len() > MAX_ROWS;
+                rows.extend(items.into_iter().take(MAX_ROWS));
+            }
+            Ok(_) => return Err((502, "query output was not a JSON array".to_owned())),
+            Err(_) => return Err((502, "query output was not valid JSON".to_owned())),
+        }
+    }
+
+    let mut columns: Vec<String> = Vec::new();
+    for row in &rows {
+        if let Value::Object(map) = row {
+            for key in map.keys() {
+                if !columns.iter().any(|existing| existing == key) {
+                    columns.push(key.clone());
+                }
+            }
+        }
+    }
+    let row_count = rows.len();
+
+    let error = captured
+        .error
+        .map(|error| {
+            if stderr.is_empty() {
+                error
+            } else {
+                format!("{error}: {stderr}")
+            }
+        })
+        .or_else(|| (row_count == 0 && !stderr.is_empty()).then(|| stderr.clone()));
+
+    Ok(json!({
+        "namespace": namespace,
+        "pod": pod,
+        "container": container,
+        "database": database,
+        "language": language,
+        "statement": statement,
+        "columns": columns,
+        "rows": rows,
+        "row_count": row_count,
+        "truncated": truncated,
+        "redacted": !state.token.is_empty(),
+        "error": error,
+    }))
+}
+
+/// Reject anything that is not a single read-only statement.
+///
+/// The console promises to write nothing to the cluster, and query languages can
+/// mutate. This is a statement-shape check, not semantic analysis: the first
+/// significant keyword must be `SELECT` or `SHOW`, a second statement is
+/// rejected, and `INTO` is rejected because `SELECT ... INTO` writes. It is
+/// deliberately paired with a read-scoped database token — this check reduces
+/// the blast radius, it does not replace database-side authorization.
+fn read_only_statement(statement: &str) -> Result<String, (u16, String)> {
+    let trimmed = statement.trim();
+    if trimmed.is_empty() {
+        return Err((400, "q is empty".to_owned()));
+    }
+    if trimmed.len() > MAX_STATEMENT {
+        return Err((
+            400,
+            format!("query is longer than {MAX_STATEMENT} characters"),
+        ));
+    }
+    if trimmed
+        .chars()
+        .any(|character| character.is_control() && !matches!(character, '\n' | '\r' | '\t'))
+    {
+        return Err((400, "query contains control characters".to_owned()));
+    }
+    let tokens = significant_tokens(trimmed)?;
+    let first = tokens
+        .first()
+        .ok_or((400, "query has no statement".to_owned()))?;
+    if !matches!(first.as_str(), "SELECT" | "SHOW") {
+        return Err((
+            400,
+            "only a single read-only SELECT or SHOW statement is allowed".to_owned(),
+        ));
+    }
+    if tokens.iter().any(|token| token == "INTO") {
+        return Err((
+            400,
+            "SELECT ... INTO writes data and is not allowed".to_owned(),
+        ));
+    }
+    Ok(trimmed.to_owned())
+}
+
+/// Uppercase keywords that appear outside string literals, quoted identifiers
+/// and comments. A statement separator followed by more keywords is an error.
+fn significant_tokens(statement: &str) -> Result<Vec<String>, (u16, String)> {
+    #[derive(PartialEq)]
+    enum Mode {
+        Normal,
+        Single,
+        Double,
+        Backtick,
+        Line,
+        Block,
+    }
+
+    fn flush(
+        word: &mut String,
+        tokens: &mut Vec<String>,
+        separator: bool,
+    ) -> Result<(), (u16, String)> {
+        if word.is_empty() {
+            return Ok(());
+        }
+        if separator {
+            return Err((400, "only a single statement is allowed".to_owned()));
+        }
+        tokens.push(std::mem::take(word));
+        Ok(())
+    }
+
+    let chars: Vec<char> = statement.chars().collect();
+    let mut mode = Mode::Normal;
+    let mut tokens: Vec<String> = Vec::new();
+    let mut word = String::new();
+    let mut separator = false;
+    let mut index = 0;
+    while index < chars.len() {
+        let character = chars[index];
+        let next = chars.get(index + 1).copied();
+        match mode {
+            Mode::Normal => match character {
+                '\'' => {
+                    flush(&mut word, &mut tokens, separator)?;
+                    mode = Mode::Single;
+                }
+                '"' => {
+                    flush(&mut word, &mut tokens, separator)?;
+                    mode = Mode::Double;
+                }
+                '`' => {
+                    flush(&mut word, &mut tokens, separator)?;
+                    mode = Mode::Backtick;
+                }
+                '-' if next == Some('-') => {
+                    flush(&mut word, &mut tokens, separator)?;
+                    mode = Mode::Line;
+                    index += 1;
+                }
+                '/' if next == Some('*') => {
+                    flush(&mut word, &mut tokens, separator)?;
+                    mode = Mode::Block;
+                    index += 1;
+                }
+                ';' => {
+                    flush(&mut word, &mut tokens, separator)?;
+                    separator = true;
+                }
+                character if character.is_alphanumeric() || character == '_' => {
+                    word.push(character.to_ascii_uppercase());
+                }
+                _ => flush(&mut word, &mut tokens, separator)?,
+            },
+            Mode::Single => {
+                if character == '\'' {
+                    if next == Some('\'') {
+                        index += 1;
+                    } else {
+                        mode = Mode::Normal;
+                    }
+                }
+            }
+            Mode::Double => {
+                if character == '"' {
+                    mode = Mode::Normal;
+                }
+            }
+            Mode::Backtick => {
+                if character == '`' {
+                    mode = Mode::Normal;
+                }
+            }
+            Mode::Line => {
+                if character == '\n' {
+                    mode = Mode::Normal;
+                }
+            }
+            Mode::Block => {
+                if character == '*' && next == Some('/') {
+                    mode = Mode::Normal;
+                    index += 1;
+                }
+            }
+        }
+        index += 1;
+    }
+    match mode {
+        Mode::Single => return Err((400, "unterminated string literal".to_owned())),
+        Mode::Double | Mode::Backtick => {
+            return Err((400, "unterminated quoted identifier".to_owned()));
+        }
+        Mode::Block => return Err((400, "unterminated comment".to_owned())),
+        _ => {}
+    }
+    flush(&mut word, &mut tokens, separator)?;
+    Ok(tokens)
+}
+
 fn valid_name(value: &str) -> bool {
     !value.is_empty()
         && value.len() <= 253
@@ -544,5 +868,73 @@ mod tests {
         );
         assert_eq!(param("tail=5", "tail"), Some("5".to_owned()));
         assert_eq!(param("tail=5", "missing"), None);
+    }
+
+    #[test]
+    fn accepts_single_read_only_statements() {
+        for statement in [
+            "SELECT * FROM home",
+            "select 1",
+            "SHOW TABLES",
+            "  SELECT time, value FROM cpu WHERE time > now() - 1h LIMIT 5  ",
+            "SELECT * FROM t;",
+            "SELECT 'drop table x; into' FROM t",
+            "SELECT 1 -- insert into x\n",
+            "SELECT /* delete from t */ 1",
+            "SELECT \"from\" FROM t",
+        ] {
+            assert!(
+                read_only_statement(statement).is_ok(),
+                "should accept: {statement}"
+            );
+        }
+    }
+
+    #[test]
+    fn rejects_writes_and_multiple_statements() {
+        for statement in [
+            "DROP TABLE home",
+            "INSERT INTO home VALUES (1)",
+            "DELETE FROM home",
+            "CREATE TABLE x (a int)",
+            "UPDATE t SET a = 1",
+            "GRANT ALL ON x TO y",
+            "SELECT * INTO target FROM home",
+            "select 1; drop table home",
+            "SELECT 1;SELECT 2",
+            "SHOW TABLES; DROP TABLE x",
+            ";",
+            "-- only a comment",
+            "",
+            "   ",
+        ] {
+            assert!(
+                read_only_statement(statement).is_err(),
+                "should reject: {statement}"
+            );
+        }
+    }
+
+    #[test]
+    fn rejects_unterminated_quoting_and_comments() {
+        assert!(read_only_statement("SELECT 'abc").is_err());
+        assert!(read_only_statement("SELECT \"abc").is_err());
+        assert!(read_only_statement("SELECT `abc").is_err());
+        assert!(read_only_statement("SELECT 1 /* trailing").is_err());
+    }
+
+    #[test]
+    fn rejects_control_characters_and_oversized_queries() {
+        assert!(read_only_statement("SELECT 1\u{0}").is_err());
+        assert!(read_only_statement("SELECT 1\u{7}").is_err());
+        assert!(read_only_statement(&format!("SELECT {}", "a".repeat(MAX_STATEMENT))).is_err());
+        assert!(read_only_statement("SELECT 1\nFROM t").is_ok());
+    }
+
+    #[test]
+    fn escape_sequences_stay_inside_string_literals() {
+        // A doubled quote closes nothing, so the trailing content is still one
+        // literal and the query remains a single statement.
+        assert!(read_only_statement("SELECT 'it''s; DROP TABLE x'").is_ok());
     }
 }

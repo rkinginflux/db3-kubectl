@@ -43,12 +43,45 @@ listening socket closes with the process, so nothing keeps serving.
 | `--include-secret-metadata` | off | Opt in to Secret names/type/key names; values are discarded, but Kubernetes requires full Secret read permission. |
 | `--no-secrets` | default behavior | Explicitly prohibit direct and Helm storage Secret reads; conflicts with both opt-ins. |
 | `--helm` | off | Explicitly allow Helm release collection, which may read/decode Secret-backed storage using operator credentials; independent of `--include-secret-metadata`. |
+| `--query` | off | Opt in to the read-only query terminal. Requires `INFLUXDB3_TOKEN` and `pods/exec` through your own kubeconfig. Accepts one `SELECT` or `SHOW` statement. |
 | `--manifest` | off | Print the read-only RBAC manifest and exit. |
 
 The browser can request a forced rebuild (`/api/snapshot?refresh=1`), but the
 server rate-limits that to one rebuild every two seconds. The UI's auto-refresh
 uses the cache instead of forcing, so a 30-second browser interval does not
 mean a rebuild every 30 seconds on a slow API server.
+
+## Query terminal
+
+Opt in with `--query`. The terminal runs one read-only statement inside a pod and
+returns the rows. Without the flag the endpoint answers 403 and every other panel
+is unchanged.
+
+```sh
+export INFLUXDB3_TOKEN=apiv3_xxxxx
+kubectl db3 webui --query
+```
+
+- `INFLUXDB3_TOKEN` must be set; the command fails at startup without it.
+- The statement runs as `kubectl exec` into the selected pod, then
+  `influxdb3 query --database <db> --language <sql|influxql> --format json
+  "<statement>"`. Exec uses your own kubeconfig, so the shipped
+  `db3-webui-readonly` ClusterRole is unchanged and still grants no `pods/exec`.
+- Only a single `SELECT` or `SHOW` statement is accepted. A second statement
+  after `;`, any other leading keyword, and `INTO` (InfluxQL's `SELECT ... INTO`
+  writes) are rejected with 400 before `kubectl` is invoked. String literals,
+  quoted identifiers, and comments are skipped, so `'a;b'` and
+  `-- drop table x` do not defeat the check.
+- That check is statement shape, not semantic analysis. Pair it with a
+  read-scoped database token: the console cannot prove an arbitrary `SELECT` has
+  no side effects, and it is not a substitute for database-side authorization.
+- The admin token reaches the pod on stdin, never in the argument list, and is
+  redacted from the response. It is read once at startup and held only in memory.
+- Statements are capped at 2048 characters and 1000 returned rows; the 8 KiB
+  request-line limit applies to the percent-encoded statement.
+- The `influxdb3` error text is returned so a failed query is diagnosable. This
+  is the one place the WebUI forwards collector stderr; it is token-redacted and
+  bounded at 64 KiB.
 
 ## What is collected
 
@@ -106,7 +139,7 @@ desired null, displayed as unknown. A role with no observed pods is not inferred
 
 ## HTTP API
 
-The console preserves its four API endpoints plus the app shell (GET/HEAD;
+The console preserves its five API endpoints plus the app shell (GET/HEAD;
 other methods return 405). All API requests, including health and manifest,
 require `X-DB3-Session`. A cryptorandom 256-bit per-run session is bootstrapped
 in the app shell's `db3-session` meta tag, never in a URL or terminal log.
@@ -122,11 +155,15 @@ multi-user authentication system: another local process can fetch the shell.
 | `/api/health` | `{"ok":true,"version":"…"}` |
 | `/api/snapshot[?refresh=1]` | The whole environment snapshot. |
 | `/api/logs?namespace=&pod=&container=&tail=` | Bounded log tail, token-redacted. |
+| `/api/query?namespace=&pod=&container=&database=&language=&q=` | One read-only statement. 403 unless `--query` was passed. |
 | `/api/manifest` | The RBAC manifest as `text/yaml`. |
 
 `/api/logs` validates namespace, pod, and container names against
 `[A-Za-z0-9._-]`, rejects a leading `-`, clamps `tail` to 1–20000, and passes
-arguments as an argv array (never a shell string). Unknown `/api/*` paths
+arguments as an argv array (never a shell string). `/api/query` applies the same
+name validation to namespace, pod, container, and database, requires
+`language=sql|influxql`, rejects a statement that is not a single read-only
+`SELECT`/`SHOW`, and passes it as one argv element. Unknown `/api/*` paths
 return JSON 404 instead of the app shell.
 
 ## Data handling
@@ -141,6 +178,9 @@ return JSON 404 instead of the app shell.
   before display sanitization, preserving database details without raw values.
 - Raw collector stderr is discarded, not forwarded to errors or the logs API.
   Errors are generic status/timeout/limit messages, never arbitrary client text.
+  The single exception is an operator-initiated `/api/query` failure, where the
+  `influxdb3` error text is returned so the statement is diagnosable; it is
+  token-redacted and bounded at 64 KiB.
 - If `INFLUXDB3_TOKEN` is exported, exact, JSON-escaped, and UTF-16-escaped
   occurrences are redacted from captured log output.
 - By default neither Secret objects nor Helm releases are requested: Helm is not
@@ -182,8 +222,9 @@ To read through that identity instead of your personal kubeconfig:
 kubectl --as=system:serviceaccount:db3-webui:db3-webui get pods -A
 ```
 
-There are no write/exec verbs and no Secret grants in the base manifest.
-Opt-in `--helm` may need separately reviewed storage Secret reads; a failed Helm panel
+There are no write/exec verbs and no Secret grants in the base manifest. The
+`--query` terminal therefore never uses that identity: it execs through your own
+kubeconfig, which must allow `pods/exec` create. Opt-in `--helm` may need separately reviewed storage Secret reads; a failed Helm panel
 is not a reason to grant broad Secret access. Review any separately scoped
 permission before opting in. The command never automatically applies RBAC.
 
@@ -209,7 +250,7 @@ cargo build --locked --release
 
 Views: Overview, Topology (nodes → workloads → services, edges derived from pod
 scheduling and selectors), InfluxDB 3, Kubernetes, Helm, Config & secrets,
-Events, Logs. The theme toggle (or `t`) switches light/dark; dark is the default
+Events, Logs, and Query (only with `--query`). The theme toggle (or `t`) switches light/dark; dark is the default
 and the choice is stored in `localStorage`. `r` refreshes. Routes are hashes
 (`#topology`), so a bookmark survives a reload.
 
@@ -251,8 +292,10 @@ contain a recognised database pod).
 
 ## Limitations
 
-- InfluxDB 3 SQL/InfluxQL is not queried; this is an environment console, not a
-  data browser. Use the database's own Web UI or CLI for queries.
+- SQL and InfluxQL are queried only through the opt-in `--query` terminal, and
+  only for a single read-only `SELECT` or `SHOW` statement. Without that flag
+  this is an environment console, not a data browser; use the database's own Web
+  UI or CLI.
 - Custom resources are not expanded into a CR table; operator-managed
   deployments are visible through their pods, workloads, Services, and Helm
   release.

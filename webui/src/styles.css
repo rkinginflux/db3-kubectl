@@ -247,6 +247,14 @@ input[type="text"], input[type="search"], select {
 input[type="search"]::placeholder { color: var(--muted); }
 select { padding-right: 8px; }
 
+textarea.query-editor {
+  width: 100%; resize: vertical; min-height: 84px;
+  background: var(--panel); border: 1px solid var(--border-strong);
+  border-radius: 8px; padding: 8px 10px; color: var(--text);
+  font-family: var(--mono); font-size: 12px; line-height: 1.55;
+}
+textarea.query-editor::placeholder { color: var(--muted); }
+
 .toolbar { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
 .toolbar .spacer { flex: 1; }
 

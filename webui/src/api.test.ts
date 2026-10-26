@@ -1,5 +1,5 @@
 import { beforeEach, expect, test, vi } from "vitest";
-import { fetchHealth, fetchLogs, fetchSnapshot } from "./api";
+import { fetchHealth, fetchLogs, fetchSnapshot, runQuery } from "./api";
 
 beforeEach(() => {
   document.head.innerHTML = '<meta name="db3-session" content="test-session">';
@@ -9,6 +9,18 @@ for (const [name, run] of [
   ["snapshot", () => fetchSnapshot({ namespace: null, refresh: true })],
   ["logs", () => fetchLogs("db3", "pod-0", null, 50)],
   ["health", () => fetchHealth()],
+  [
+    "query",
+    () =>
+      runQuery({
+        namespace: "db3",
+        pod: "pod-0",
+        container: null,
+        database: "mydb",
+        language: "sql",
+        statement: "SELECT 1",
+      }),
+  ],
 ] as const) {
   test(`${name} sends session only in request header`, async () => {
     await run();
