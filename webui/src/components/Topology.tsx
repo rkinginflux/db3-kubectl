@@ -80,10 +80,15 @@ export function Topology({ snapshot }: { snapshot: Snapshot }) {
     // unmapped rather than invent ownership from a shared component label.
     if (pods.some((pod) => !knownOwners.has(podOwnerKey(pod)))) partial = true;
 
-    const eligibleServices = snapshot.services.filter(
-      (service) => service.component || service.selector["app.kubernetes.io/component"],
+    // Every collected service is listed, like the Nodes column. A service that
+    // carries a recognised component is ranked first so that, when the cap bites,
+    // the database-facing ones are not displaced by unrelated cluster services.
+    const databaseService = (service: ServiceRow) =>
+      Boolean(service.component || service.selector["app.kubernetes.io/component"]);
+    const rankedServices = [...snapshot.services].sort(
+      (a, b) => Number(databaseService(b)) - Number(databaseService(a)),
     );
-    const services = eligibleServices.slice(0, LIMIT);
+    const services = rankedServices.slice(0, LIMIT);
 
     // Every collected node is listed, capped only by LIMIT. Deriving this column
     // from the capped pod list made a node disappear whenever the pods running on
@@ -97,7 +102,7 @@ export function Topology({ snapshot }: { snapshot: Snapshot }) {
     noteCap("database pods", pods.length, eligiblePods.length);
     // Workloads are derived from the displayed pods, so they can never exceed the
     // pod cap; only pods, services and nodes can be truncated independently.
-    noteCap("services", services.length, eligibleServices.length);
+    noteCap("services", services.length, snapshot.services.length);
     noteCap("nodes", nodes.length, snapshot.nodes.length);
     if (truncated.length > 0) partial = true;
 

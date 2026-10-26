@@ -311,9 +311,11 @@ contain a recognised database pod).
   comparisons with visible partial/truncation findings. The browser topology
   caps each input column at 80, edges at 500, and relationship/selector work at
   20,000; the cap is applied after eligibility, so ineligible rows cannot
-  consume a column's budget. The Nodes column lists every collected node, not
-  only those hosting a database pod. Its partial notice reports how many rows
-  are shown against how many exist, and includes unmapped ownership. Only
+  consume a column's budget. The Nodes and Services columns list every
+  collected node and service, not only the database-related ones; services
+  carrying a recognised component are ranked first so the cap cannot crowd
+  them out. Its partial notice reports how many rows are shown against how
+  many exist, and includes unmapped ownership. Only
   observed namespace + owner kind/name links are used, not same-role guesses;
   ReplicaSet-to-Deployment ancestry is not collected.
 - A missing role means not observed in this scope, not proof it is absent.
