@@ -16,7 +16,7 @@ This project is not an official product of InfluxData. See [trademark usage and 
 Clone the source and enter the project directory:
 
 ```sh
-git clone https://github.com/rkinginflux/db3-kubectl.git
+git clone https://github.com/influxdata/db3-kubectl.git
 cd db3-kubectl
 ```
 
@@ -253,7 +253,7 @@ DB3_BINARY="$PWD/target/release/kubectl-db3" python3 -m unittest discover -s tes
 
 Rust tests cover native behavior. The retained Python black-box compatibility suite invokes the compiled binary directly; Python is test tooling only. Without DB3_BINARY it tests the project-root executable. Tests use temporary executable kubectl/database-CLI substitutes and never contact a cluster. They cover collection, command construction, token transport/redaction, actual remote-shell execution against a substitute CLI, partial failures, invalid JSON, timeout, private permissions, target configuration, and output preservation. The console suite starts the real binary against fake `kubectl`/`helm` programs and asserts the embedded app is served, snapshots derive cluster/role/finding data, secret values never appear in the payload, argument injection is rejected, a total collector failure still returns a snapshot, and SIGINT stops the listener and releases the port. Real kubectl plugin dispatch can also be checked safely with `kubectl db3 support --help` and `kubectl db3 webui --help`.
 
-Live-cluster collection is not part of the automated tests. The collector does not upload support data and the console does not upload snapshots. Source repository: https://github.com/rkinginflux/db3-kubectl.
+Live-cluster collection is not part of the automated tests. The collector does not upload support data and the console does not upload snapshots. Source repository: https://github.com/influxdata/db3-kubectl.
 
 ## License
 
