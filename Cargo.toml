@@ -3,7 +3,7 @@ name = "kubectl-db3"
 version = "0.1.0"
 edition = "2024"
 rust-version = "1.85"
-description = "Private InfluxDB 3 Enterprise support bundles via kubectl"
+description = "Independent kubectl plugin for database support bundles and Kubernetes logs"
 license = "MIT"
 
 [dependencies]

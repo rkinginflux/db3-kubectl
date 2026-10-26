@@ -285,3 +285,19 @@ fn missing_pod_is_usage_error() {
     assert_eq!(result.status.code(), Some(2));
     assert!(String::from_utf8_lossy(&result.stderr).contains("--pod"));
 }
+
+#[test]
+fn help_identifies_independent_project_and_attributes_trademark() {
+    let result = Command::new(env!("CARGO_BIN_EXE_kubectl-db3"))
+        .arg("--help")
+        .output()
+        .unwrap();
+    assert!(result.status.success());
+    let help = String::from_utf8_lossy(&result.stdout);
+    assert!(help.contains("Independent kubectl plugin"));
+    assert!(help.contains("InfluxDB® 3 Enterprise databases"));
+    assert!(help.contains("InfluxDB® is a trademark registered by InfluxData"));
+    assert!(help.contains("not affiliated with"));
+    assert!(help.contains("does not endorse"));
+    assert!(help.contains("this project"));
+}
