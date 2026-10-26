@@ -155,6 +155,12 @@ environment that hosts an InfluxDB 3 deployment: topology, workloads, Services
 and endpoints, storage, Helm releases, ConfigMaps and secret key names, events,
 and on-demand log tails.
 
+![Topology view: nodes, InfluxDB 3 workloads, and Services](docs/images/console-topology.png)
+
+*Topology view. Nodes, database workloads, and Services are laid out left to
+right; edges are derived from pod scheduling and Service selectors. Each Service
+card shows its type, its ports, and how many endpoints are ready.*
+
 ```sh
 kubectl db3 webui
 # URL      http://127.0.0.1:9191
@@ -204,6 +210,13 @@ default. `--include-secret-metadata` allows direct Secret reads; independently,
 `--helm` allows Helm to read/decode Secret-backed release storage, including
 stored values. `--no-secrets` explicitly prevents either opt-in. The base RBAC
 never grants Secret reads.
+
+![Logs view: bounded pod log tail with redaction markers](docs/images/console-logs.png)
+
+*Logs view. A bounded read of one pod's log through the Kubernetes API, with the
+container, line limit, and pause controls selectable and a copy-to-clipboard
+action. Known exported admin tokens are replaced with a `token redacted` marker
+in the returned text.*
 
 The UI is a React single-page app embedded in the binary (no Node runtime and no
 network fetch at run time). Dark is the default theme; the header toggle (or `t`)
