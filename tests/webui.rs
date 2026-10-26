@@ -475,12 +475,27 @@ fn successful_collectors_clean_up_background_descendants() {
     let server = start(dir.path(), &[]);
     let _ = snapshot(server.port);
     let pids = fs::read_to_string(dir.path().join("background-pids")).unwrap();
+    assert!(
+        !pids.trim().is_empty(),
+        "the substitute kubectl recorded no background pid, so this test would pass vacuously"
+    );
+    // The collector signals the process group before reaping its direct child, and
+    // the orphaned descendant is reaped asynchronously. It can therefore still be
+    // present for a moment after the snapshot returns, so allow a short grace
+    // period. A descendant that is genuinely leaked still fails here.
+    let deadline = Instant::now() + Duration::from_secs(5);
     for pid in pids.split_whitespace() {
-        let status = fs::read_to_string(format!("/proc/{pid}/stat")).unwrap_or_default();
-        assert!(
-            status.is_empty() || status.split_whitespace().nth(2) == Some("Z"),
-            "successful collector left descendant alive: {pid}"
-        );
+        loop {
+            let status = fs::read_to_string(format!("/proc/{pid}/stat")).unwrap_or_default();
+            if status.is_empty() || status.split_whitespace().nth(2) == Some("Z") {
+                break;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "successful collector left descendant alive: {pid}"
+            );
+            std::thread::sleep(Duration::from_millis(25));
+        }
     }
 }
 
