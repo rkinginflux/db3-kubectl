@@ -310,8 +310,11 @@ contain a recognised database pod).
 - Resource arrays are capped at 500 entries and service matching at 50,000
   comparisons with visible partial/truncation findings. The browser topology
   caps each input column at 80, edges at 500, and relationship/selector work at
-  20,000. Its partial notice includes unmapped ownership. Only observed
-  namespace + owner kind/name links are used, not same-role guesses;
+  20,000; the cap is applied after eligibility, so ineligible rows cannot
+  consume a column's budget. The Nodes column lists every collected node, not
+  only those hosting a database pod. Its partial notice reports how many rows
+  are shown against how many exist, and includes unmapped ownership. Only
+  observed namespace + owner kind/name links are used, not same-role guesses;
   ReplicaSet-to-Deployment ancestry is not collected.
 - A missing role means not observed in this scope, not proof it is absent.
 - WebUI collectors have a 4 MiB stdout limit, timeout and cancellation checks.

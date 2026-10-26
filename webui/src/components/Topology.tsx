@@ -45,6 +45,11 @@ function spread(items: number[], minGap: number): number[] {
   return result;
 }
 
+// Ownership is an exact match on namespace, owner kind and owner name, so it can
+// be resolved through a key set rather than a budgeted cross product.
+const podOwnerKey = (pod: PodRow) => `${pod.namespace}\u0000${pod.owner_kind}\u0000${pod.owner_name}`;
+const workloadOwnerKey = (workload: WorkloadRow) => `${workload.namespace}\u0000${workload.kind}\u0000${workload.name}`;
+
 export function Topology({ snapshot }: { snapshot: Snapshot }) {
   const [selected, setSelected] = useState<string | null>(null);
 
@@ -52,7 +57,7 @@ export function Topology({ snapshot }: { snapshot: Snapshot }) {
     const LIMIT = 80; // At most 240 rendered boxes across the three columns.
     const WORK = 20_000;
     let comparisons = 0;
-    let partial = [snapshot.pods, snapshot.workloads, snapshot.services, snapshot.nodes].some(rows => rows.length > LIMIT);
+    let partial = false;
     const spend = (cost = 1) => {
       comparisons += cost;
       if (comparisons > WORK) { partial = true; return false; }
@@ -60,17 +65,41 @@ export function Topology({ snapshot }: { snapshot: Snapshot }) {
     };
     const owns = (pod: PodRow, workload: WorkloadRow) => spend() && pod.namespace === workload.namespace && pod.owner_kind === workload.kind && pod.owner_name === workload.name;
     const selectorMatches = (pod: PodRow, service: ServiceRow) => spend(Object.keys(service.selector).length + 1) && matchesSelector(pod, service);
-    const pods = snapshot.pods.slice(0, LIMIT).filter((pod) => pod.component);
-    const workloads = snapshot.workloads.slice(0, LIMIT).filter((workload) => pods.some(pod => owns(pod, workload)));
+
+    // Eligibility is decided before the cap. Slicing first let rows that do not
+    // qualify consume the budget and silently dropped qualifying rows past the
+    // cap, which could hide a workload and the node it runs on.
+    const eligiblePods = snapshot.pods.filter((pod) => pod.component);
+    const pods = eligiblePods.slice(0, LIMIT);
+
+    const podOwners = new Set(pods.map(podOwnerKey));
+    const knownOwners = new Set(snapshot.workloads.map(workloadOwnerKey));
+    const matchedWorkloads = snapshot.workloads.filter((workload) => podOwners.has(workloadOwnerKey(workload)));
+    const workloads = matchedWorkloads.slice(0, LIMIT);
     // ReplicaSet -> Deployment ancestry is not collected. Leave those pods
     // unmapped rather than invent ownership from a shared component label.
-    if (pods.some(pod => !workloads.some(workload => owns(pod, workload)))) partial = true;
-    const services = snapshot.services.slice(0, LIMIT).filter(
+    if (pods.some((pod) => !knownOwners.has(podOwnerKey(pod)))) partial = true;
+
+    const eligibleServices = snapshot.services.filter(
       (service) => service.component || service.selector["app.kubernetes.io/component"],
     );
+    const services = eligibleServices.slice(0, LIMIT);
 
-    const nodesUsed = new Set(pods.map((pod) => pod.node).filter(Boolean) as string[]);
-    const nodes = snapshot.nodes.slice(0, LIMIT).filter((node) => nodesUsed.has(node.name));
+    // Every collected node is listed, capped only by LIMIT. Deriving this column
+    // from the capped pod list made a node disappear whenever the pods running on
+    // it fell outside the cap, so the Nodes column under-reported the cluster.
+    const nodes = snapshot.nodes.slice(0, LIMIT);
+
+    const truncated: string[] = [];
+    const noteCap = (label: string, shown: number, total: number) => {
+      if (shown < total) truncated.push(`${shown} of ${total} ${label}`);
+    };
+    noteCap("database pods", pods.length, eligiblePods.length);
+    // Workloads are derived from the displayed pods, so they can never exceed the
+    // pod cap; only pods, services and nodes can be truncated independently.
+    noteCap("services", services.length, eligibleServices.length);
+    noteCap("nodes", nodes.length, snapshot.nodes.length);
+    if (truncated.length > 0) partial = true;
 
     // ---------------------------------------------------------------- nodes
     const nodeBoxes: Box[] = nodes.map((node, index) => ({
@@ -182,6 +211,7 @@ export function Topology({ snapshot }: { snapshot: Snapshot }) {
     const lowest = Math.max(0, ...[...nodeBoxes, ...workBoxes, ...serviceBoxes].map((box) => box.y + box.height));
     return {
       partial,
+      truncated,
       nodeBoxes,
       workBoxes,
       serviceBoxes,
@@ -227,7 +257,11 @@ export function Topology({ snapshot }: { snapshot: Snapshot }) {
         )
       }
     >
-      {layout.partial && <p role="status" className="muted">Partial topology: node, edge or selector-work limits reached, or pod ownership is unmapped. Only observed owner references are linked; missing ancestry is not inferred.</p>}
+      {layout.partial && (
+        <p role="status" className="muted">
+          Partial topology{layout.truncated.length > 0 ? `: showing ${layout.truncated.join(", ")}` : ""}. Only observed owner references are linked; missing ancestry is not inferred.
+        </p>
+      )}
       {layout.workBoxes.length === 0 ? (
         <Empty glyph="◇">No database workloads matched the collected namespaces.</Empty>
       ) : (
