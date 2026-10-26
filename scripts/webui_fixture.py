@@ -28,7 +28,14 @@ def main():
     args.directory.mkdir(parents=True, exist_ok=False)
     fixtures = re.findall(r'write_fixture\(\s*dir.path\(\),\s*"([\w.-]+)",\s*r#"(.*?)"#', source, re.S)
     assert fixtures, "Rust fixture extraction failed"
+    # Individual tests rewrite the shared fixtures to build their own cases.
+    # Keep the first definition of each name — the canonical set from fixture()
+    # — so a test that appends its own pods.json cannot replace the set the
+    # smoke run is meant to exercise.
+    exported = {}
     for name, text in fixtures:
+        exported.setdefault(name, text)
+    for name, text in exported.items():
         json.loads(text)
         (args.directory / name).write_text(text)
     for name in ("kubectl", "helm"):
@@ -37,7 +44,7 @@ def main():
         path = args.directory / name
         path.write_text(match.group(1))
         path.chmod(0o700)
-    print(f"Exported {len(fixtures)} synthetic JSON fixtures and kubectl/helm to {args.directory}")
+    print(f"Exported {len(exported)} synthetic JSON fixtures and kubectl/helm to {args.directory}")
     if not args.binary:
         return
     env = dict(os.environ, PATH=f"{args.directory.resolve()}:/usr/bin:/bin", KUBECONFIG=str(args.directory / "unused-kubeconfig"))

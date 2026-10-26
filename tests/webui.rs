@@ -47,6 +47,7 @@ case "$args" in
   *"get namespaces"*) cat "$DIR/namespaces.json" ;;
   *"get pods"*) cat "$DIR/pods.json" ;;
   *"get statefulsets,deployments,daemonsets"*) cat "$DIR/workloads.json" ;;
+*"get replicasets"*) cat "$DIR/replicasets.json" ;;
   *"get services"*) cat "$DIR/services.json" ;;
   *"get endpointslices"*) cat "$DIR/endpointslices.json" ;;
   *"get storageclasses"*) printf '{"items":[]}' ;;
@@ -152,6 +153,7 @@ fn fixture() -> tempfile::TempDir {
             "spec":{"type":"ClusterIP","clusterIP":"10.43.0.10","selector":{"app.kubernetes.io/component":"ingester"},
                     "ports":[{"name":"http","port":8181,"targetPort":8181,"protocol":"TCP"}]}}]}"#,
     );
+    write_fixture(dir.path(), "replicasets.json", r#"{"items":[]}"#);
     write_fixture(
         dir.path(),
         "endpointslices.json",
@@ -1497,4 +1499,44 @@ fn configuration_byte_budget_counts_final_masked_representation() {
         .find(|v| v["name"] == "configuration")
         .unwrap();
     assert_eq!(config["ok"], false);
+}
+
+#[test]
+fn deployment_pods_resolve_through_the_collected_replicaset() {
+    let dir = fixture();
+    // A Deployment pod is owned by its ReplicaSet, and the ReplicaSet records the
+    // Deployment. Following that one hop is what lets seaweedfs-style workloads
+    // appear instead of dropping out as unmapped.
+    write_fixture(
+        dir.path(),
+        "pods.json",
+        r#"{"items":[{"metadata":{"name":"web-6d4f8c9b7-x2kqp","namespace":"app","creationTimestamp":"2026-10-20T00:00:00Z",
+        "labels":{},"ownerReferences":[{"kind":"ReplicaSet","name":"web-6d4f8c9b7","controller":true}]},
+        "spec":{"nodeName":"node-1","containers":[{"name":"web","image":"nginx:1.27"}]},
+        "status":{"phase":"Running","conditions":[{"type":"Ready","status":"True"}],
+        "containerStatuses":[{"name":"web","ready":true,"restartCount":0,"state":{"running":{}}}],
+        "startTime":"2026-10-20T00:00:00Z"}}]}"#,
+    );
+    write_fixture(
+        dir.path(),
+        "replicasets.json",
+        r#"{"items":[{"metadata":{"name":"web-6d4f8c9b7","namespace":"app",
+        "ownerReferences":[{"kind":"Deployment","name":"web","controller":true}]}}]}"#,
+    );
+    let server = start(dir.path(), &[]);
+    let value = snapshot(server.port);
+
+    let pods = value["pods"].as_array().unwrap();
+    let pod = pods
+        .iter()
+        .find(|pod| pod["name"] == "web-6d4f8c9b7-x2kqp")
+        .expect("pod collected");
+    assert_eq!(pod["owner_kind"], serde_json::json!("Deployment"));
+    assert_eq!(pod["owner_name"], serde_json::json!("web"));
+
+    let calls = fs::read_to_string(dir.path().join("kubectl-calls")).unwrap();
+    assert!(
+        calls.lines().any(|line| line.contains("get replicasets")),
+        "the collector must request replicasets to resolve ancestry"
+    );
 }

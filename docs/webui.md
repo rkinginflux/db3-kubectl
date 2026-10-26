@@ -97,6 +97,7 @@ the snapshot.
 | `namespaces` | `kubectl get namespaces -o json` |
 | `pods` | `kubectl get pods [-A] -o json` |
 | `workloads` | `kubectl get statefulsets,deployments,daemonsets [-A] -o json` |
+| `replicasets` | `kubectl get replicasets [-A] -o json` (only to resolve Deployment ancestry) |
 | `services` | `kubectl get services [-A] -o json` |
 | `endpointslices` | `kubectl get endpointslices.discovery.k8s.io [-A] -o json` |
 | `storageclasses` | `kubectl get storageclasses -o json` |
@@ -133,9 +134,12 @@ store comes from `--object-store=`. License presence is derived from
 
 Role desired counts use only observed pod owner kind/name plus namespace,
 never same-role workload labels. Verified distinct owners are summed once;
-with multiple owners the singular workload field remains null. Missing or
-ambiguous owner chains (including ReplicaSet-to-Deployment) leave workload and
-desired null, displayed as unknown. A role with no observed pods is not inferred.
+with multiple owners the singular workload field remains null. A pod owned by a
+ReplicaSet is resolved one level to its Deployment through the ReplicaSet's own
+observed owner reference, so Deployment workloads are matched rather than
+appearing unmapped. If `replicasets` is denied, the pod keeps its observed
+ReplicaSet owner and is shown as unmapped instead of being guessed from the
+name. A role with no observed pods is not inferred.
 
 ## HTTP API
 
@@ -273,8 +277,10 @@ still renders.
 
 **No InfluxDB 3 cluster.** The deployment may use different role labels. Check
 `kubectl get pods -A --show-labels`; if the component label differs, the pod
-name heuristics may still catch it (marked `~`). Otherwise the topology is
-empty by design rather than guessing.
+name heuristics may still catch it (marked `~`). The Topology view does not
+depend on this: it draws every node, every workload that owns a visible pod, and
+every service, so a non-InfluxDB or differently-labelled environment still
+renders. A role that cannot be identified stays unknown rather than guessed.
 
 **Endpoints show zero ready.** `endpointslices.discovery.k8s.io` may be
 forbidden by RBAC on older clusters. Check the Collectors panel for that
@@ -310,14 +316,14 @@ contain a recognised database pod).
 - Resource arrays are capped at 500 entries and service matching at 50,000
   comparisons with visible partial/truncation findings. The browser topology
   caps each input column at 80, edges at 500, and relationship/selector work at
-  20,000; the cap is applied after eligibility, so ineligible rows cannot
-  consume a column's budget. The Nodes and Services columns list every
-  collected node and service, not only the database-related ones; services
-  carrying a recognised component are ranked first so the cap cannot crowd
-  them out. Its partial notice reports how many rows are shown against how
-  many exist, and includes unmapped ownership. Only
-  observed namespace + owner kind/name links are used, not same-role guesses;
-  ReplicaSet-to-Deployment ancestry is not collected.
+  20,000; rows are ranked before the cap so a relevant row cannot be displaced
+  by unrelated ones. The Nodes and Services columns list every collected node
+  and service, and the Workloads column lists every workload that owns a visible
+  pod, not only the database-related ones; components are used only for ranking.
+  Its partial notice reports how many rows are shown against how many exist, and
+  includes unmapped ownership. Only observed namespace + owner kind/name links
+  are used, not same-role guesses; a ReplicaSet owner is followed one level to
+  its Deployment through the ReplicaSet's recorded owner reference.
 - A missing role means not observed in this scope, not proof it is absent.
 - WebUI collectors have a 4 MiB stdout limit, timeout and cancellation checks.
   Their process groups are killed before reaping direct children, including

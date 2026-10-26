@@ -582,7 +582,33 @@ fn owner_of(pod: &Value) -> (Option<String>, Option<String>) {
 
 // -------------------------------------------------------------- conversions
 
-fn pod_row(pod: &Value) -> Value {
+/// A Deployment's pods are owned by a ReplicaSet, so the pod's own owner
+/// reference points at the ReplicaSet rather than the workload a user sees.
+/// Resolve one level through the collected ReplicaSet's observed owner
+/// reference. This uses recorded owner data only — no name or hash heuristic.
+fn replica_owner_map(value: Option<&Value>) -> BTreeMap<(String, String), String> {
+    let Some(value) = value else {
+        return BTreeMap::new();
+    };
+    items(value)
+        .iter()
+        .filter_map(|replica| {
+            let namespace = text(replica, &["metadata", "namespace"])?;
+            let name = text(replica, &["metadata", "name"])?;
+            let deployment = at(replica, &["metadata", "ownerReferences"])
+                .and_then(Value::as_array)?
+                .iter()
+                .find(|owner| owner["controller"] == true && owner["kind"] == "Deployment")
+                .and_then(|owner| text(owner, &["name"]))?;
+            Some((
+                (namespace.to_owned(), name.to_owned()),
+                deployment.to_owned(),
+            ))
+        })
+        .collect()
+}
+
+fn pod_row(pod: &Value, replica_owners: &BTreeMap<(String, String), String>) -> Value {
     let namespace = text(pod, &["metadata", "namespace"])
         .unwrap_or("default")
         .to_owned();
@@ -595,7 +621,15 @@ fn pod_row(pod: &Value) -> Value {
         .into_iter()
         .flatten()
         .find_map(detect_mode);
-    let (owner_kind, owner_name) = owner_of(pod);
+    let (owner_kind, owner_name) = match owner_of(pod) {
+        (Some(kind), Some(name)) if kind == "ReplicaSet" => {
+            match replica_owners.get(&(namespace.clone(), name.clone())) {
+                Some(deployment) => (Some("Deployment".to_owned()), Some(deployment.clone())),
+                None => (Some(kind), Some(name)),
+            }
+        }
+        other => other,
+    };
     json!({
         "namespace": namespace,
         "name": text(pod, &["metadata", "name"]).unwrap_or(""),
@@ -1019,6 +1053,19 @@ pub fn snapshot(opts: &Options) -> Value {
             ],
         },
         Job {
+            name: "replicasets",
+            program: "kubectl",
+            args: namespace_scoped(
+                opts,
+                vec![
+                    "get".to_owned(),
+                    "replicasets".to_owned(),
+                    "-o".to_owned(),
+                    "json".to_owned(),
+                ],
+            ),
+        },
+        Job {
             name: "pods",
             program: "kubectl",
             args: namespace_scoped(
@@ -1198,9 +1245,16 @@ pub fn snapshot(opts: &Options) -> Value {
                 .collect()
         })
         .unwrap_or_default();
+    let replica_owners =
+        replica_owner_map(find("replicasets").and_then(|outcome| outcome.value.as_ref()));
     let pods: Vec<Value> = find("pods")
         .and_then(|outcome| outcome.value.as_ref())
-        .map(|value| items(value).iter().map(pod_row).collect())
+        .map(|value| {
+            items(value)
+                .iter()
+                .map(|pod| pod_row(pod, &replica_owners))
+                .collect()
+        })
         .unwrap_or_default();
     let workloads: Vec<Value> = find("workloads")
         .and_then(|outcome| outcome.value.as_ref())
@@ -1924,4 +1978,80 @@ pub fn snapshot(opts: &Options) -> Value {
         }
     }
     result
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn pod_with_owner(kind: &str, name: &str) -> Value {
+        json!({
+            "metadata": {
+                "namespace": "s3",
+                "name": "seaweedfs-worker-8586c9cd8f-8dvpb",
+                "ownerReferences": [{"kind": kind, "name": name, "controller": true}]
+            },
+            "spec": {
+                "nodeName": "panama",
+                "containers": [{"name": "worker", "image": "chrislusf/seaweedfs:3.71"}]
+            },
+            "status": {
+                "phase": "Running",
+                "containerStatuses": [{"ready": true, "restartCount": 0, "name": "worker"}]
+            }
+        })
+    }
+
+    fn replicasets() -> Value {
+        json!({"items": [{
+            "metadata": {
+                "namespace": "s3",
+                "name": "seaweedfs-worker-8586c9cd8f",
+                "ownerReferences": [{"kind": "Deployment", "name": "seaweedfs-worker", "controller": true}]
+            }
+        }]})
+    }
+
+    #[test]
+    fn replica_owner_map_reads_the_kubectl_items_envelope() {
+        // kubectl returns {"items": [...]}, not a bare array. Reading it as an
+        // array yields an empty map and the ancestry silently stops resolving.
+        let owners = replica_owner_map(Some(&replicasets()));
+        assert_eq!(owners.len(), 1);
+        assert_eq!(
+            owners.get(&("s3".to_owned(), "seaweedfs-worker-8586c9cd8f".to_owned())),
+            Some(&"seaweedfs-worker".to_owned())
+        );
+    }
+
+    #[test]
+    fn deployment_pods_resolve_through_their_replicaset() {
+        let owners = replica_owner_map(Some(&replicasets()));
+        let row = pod_row(
+            &pod_with_owner("ReplicaSet", "seaweedfs-worker-8586c9cd8f"),
+            &owners,
+        );
+        assert_eq!(row["owner_kind"], json!("Deployment"));
+        assert_eq!(row["owner_name"], json!("seaweedfs-worker"));
+    }
+
+    #[test]
+    fn unresolved_replicaset_is_left_as_observed() {
+        // RBAC may deny replicasets; the pod keeps its observed owner rather
+        // than gaining a guessed Deployment.
+        let row = pod_row(
+            &pod_with_owner("ReplicaSet", "unlisted-123"),
+            &BTreeMap::new(),
+        );
+        assert_eq!(row["owner_kind"], json!("ReplicaSet"));
+        assert_eq!(row["owner_name"], json!("unlisted-123"));
+    }
+
+    #[test]
+    fn non_deployment_owners_are_untouched() {
+        let owners = replica_owner_map(Some(&replicasets()));
+        let row = pod_row(&pod_with_owner("DaemonSet", "calico-node"), &owners);
+        assert_eq!(row["owner_kind"], json!("DaemonSet"));
+        assert_eq!(row["owner_name"], json!("calico-node"));
+    }
 }

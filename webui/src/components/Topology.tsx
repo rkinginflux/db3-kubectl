@@ -66,19 +66,25 @@ export function Topology({ snapshot }: { snapshot: Snapshot }) {
     const owns = (pod: PodRow, workload: WorkloadRow) => spend() && pod.namespace === workload.namespace && pod.owner_kind === workload.kind && pod.owner_name === workload.name;
     const selectorMatches = (pod: PodRow, service: ServiceRow) => spend(Object.keys(service.selector).length + 1) && matchesSelector(pod, service);
 
-    // Eligibility is decided before the cap. Slicing first let rows that do not
-    // qualify consume the budget and silently dropped qualifying rows past the
-    // cap, which could hide a workload and the node it runs on.
-    const eligiblePods = snapshot.pods.filter((pod) => pod.component);
-    const pods = eligiblePods.slice(0, LIMIT);
+    // Every workload running on a visible node is shown, not only the pods
+    // labelled as part of the InfluxDB 3 deployment. Pods with a recognised
+    // component are ranked first so that, when the cap bites, the database
+    // workloads keep their edges.
+    const rankedPods = [...snapshot.pods].sort(
+      (a, b) => Number(Boolean(b.component)) - Number(Boolean(a.component)),
+    );
+    const pods = rankedPods.slice(0, LIMIT);
 
     const podOwners = new Set(pods.map(podOwnerKey));
     const knownOwners = new Set(snapshot.workloads.map(workloadOwnerKey));
     const matchedWorkloads = snapshot.workloads.filter((workload) => podOwners.has(workloadOwnerKey(workload)));
-    const workloads = matchedWorkloads.slice(0, LIMIT);
-    // ReplicaSet -> Deployment ancestry is not collected. Leave those pods
-    // unmapped rather than invent ownership from a shared component label.
-    if (pods.some((pod) => !knownOwners.has(podOwnerKey(pod)))) partial = true;
+    const rankedWorkloads = [...matchedWorkloads].sort(
+      (a, b) => Number(Boolean(b.component)) - Number(Boolean(a.component)),
+    );
+    const workloads = rankedWorkloads.slice(0, LIMIT);
+    // The collector resolves ReplicaSet ancestry, so a pod whose owner is absent
+    // from the workload list is genuinely unmapped rather than one hop short.
+    if (pods.some((pod) => pod.owner_kind && !knownOwners.has(podOwnerKey(pod)))) partial = true;
 
     // Every collected service is listed, like the Nodes column. A service that
     // carries a recognised component is ranked first so that, when the cap bites,
@@ -99,7 +105,7 @@ export function Topology({ snapshot }: { snapshot: Snapshot }) {
     const noteCap = (label: string, shown: number, total: number) => {
       if (shown < total) truncated.push(`${shown} of ${total} ${label}`);
     };
-    noteCap("database pods", pods.length, eligiblePods.length);
+    noteCap("pods", pods.length, snapshot.pods.length);
     // Workloads are derived from the displayed pods, so they can never exceed the
     // pod cap; only pods, services and nodes can be truncated independently.
     noteCap("services", services.length, snapshot.services.length);
@@ -230,7 +236,7 @@ export function Topology({ snapshot }: { snapshot: Snapshot }) {
 
   const columns = [
     { title: "Nodes", count: layout.nodeBoxes.length },
-    { title: "InfluxDB 3 workloads", count: layout.workBoxes.length },
+    { title: "Workloads", count: layout.workBoxes.length },
     { title: "Services", count: layout.serviceBoxes.length },
   ];
 
@@ -249,7 +255,7 @@ export function Topology({ snapshot }: { snapshot: Snapshot }) {
   return (
     <Card
       title="Cluster topology"
-      subtitle="Nodes → database workloads → Services. Edges are derived from pod scheduling and Service selectors."
+      subtitle="Nodes → workloads → Services. Edges are derived from pod scheduling and Service selectors."
       actions={
         selected ? (
           <button type="button" className="btn small ghost" onClick={() => setSelected(null)}>

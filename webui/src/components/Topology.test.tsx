@@ -31,15 +31,21 @@ test("every collected node is listed, including one running no database pod", ()
   expect(screen.getByRole("button", { name: /^node-b,/ })).toBeInTheDocument();
 });
 
-test("the cap applies after eligibility, not before", () => {
+test("pods with a component are ranked ahead of the cap", () => {
   const data = snapshot(100);
-  // 50 pods carry no component and 50 do. Slicing to the cap first spent the
-  // budget on ineligible rows, so only 30 qualifying pods survived.
+  // 50 pods carry no component and are listed first, 50 database pods follow.
+  // A plain slice to the cap would take the 50 unrelated pods plus 30 database
+  // ones and lose the rest; ranking keeps every database pod inside the budget.
   data.pods = Array.from({ length: 100 }, (_, n) => ({ ...pod(n), component: n < 50 ? null : "ingester" }));
   data.services = [];
   data.nodes = [];
   render(<Topology snapshot={data} />);
-  expect(screen.getByText(/InfluxDB 3 workloads/).textContent).toMatch(/\(50\)/);
+  expect(screen.getByText(/^Workloads/).textContent).toMatch(/\(80\)/);
+  expect(screen.getByRole("button", { name: /db-99,/ })).toBeInTheDocument();
+  // The cap admits the 50 database pods plus 30 unrelated ones, so pods 30-49
+  // are the ones dropped and their workloads are not drawn.
+  expect(screen.getByRole("button", { name: /db-0,/ })).toBeInTheDocument();
+  expect(screen.queryByRole("button", { name: /db-45,/ })).not.toBeInTheDocument();
 });
 
 test("large graphs have explicit node edge and selector work budgets with partial notice", () => {
@@ -54,7 +60,7 @@ test("truncation reports what is shown against what exists", () => {
   data.nodes = Array.from({ length: 100 }, (_, n) => node(`node-${n}`));
   render(<Topology snapshot={data} />);
   const notice = screen.getByText(/partial topology/i).textContent ?? "";
-  expect(notice).toMatch(/80 of 100 database pods/);
+  expect(notice).toMatch(/80 of 100 pods/);
   expect(notice).toMatch(/80 of 100 services/);
   expect(notice).toMatch(/80 of 100 nodes/);
 });
@@ -70,6 +76,19 @@ test("every collected service is listed, including one with no component", () =>
   // entirely, which made the Services column under-report the cluster.
   expect(screen.getByRole("button", { name: /db3-ingest,/ })).toBeInTheDocument();
   expect(screen.getByRole("button", { name: /kubernetes,/ })).toBeInTheDocument();
+});
+
+test("workloads without an InfluxDB component are still shown", () => {
+  const data = snapshot(1);
+  // Shape of a real cluster: a DaemonSet pod on a node, no InfluxDB labels.
+  data.pods = [
+    { ...pod(0), component: null, owner_kind: "DaemonSet", owner_name: "calico-node", node: "node-a" },
+  ];
+  data.workloads = [{ ...work(0), name: "calico-node", kind: "DaemonSet", component: null }];
+  data.services = [];
+  data.nodes = [node("node-a")];
+  render(<Topology snapshot={data} />);
+  expect(screen.getByRole("button", { name: /calico-node,/ })).toBeInTheDocument();
 });
 
 test("when services exceed the cap, database services keep their place", () => {
