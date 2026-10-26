@@ -5,18 +5,73 @@ on:
     branches: [ "master" ]
   pull_request:
     branches: [ "master" ]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
 
 env:
   CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: 0
+  RUST_BACKTRACE: 1
 
 jobs:
+  # Job id kept as "build" so the status check name does not change.
   build:
-
     runs-on: ubuntu-latest
+    timeout-minutes: 15
 
     steps:
     - uses: actions/checkout@v4
+
+    - name: Install stable toolchain
+      uses: dtolnay/rust-toolchain@stable
+      with:
+        components: rustfmt, clippy
+
+    - name: Cache cargo registry and build artifacts
+      uses: Swatinem/rust-cache@v2
+
+    - name: Check formatting
+      run: cargo fmt --all --check
+
+    - name: Lint
+      run: cargo clippy --locked --all-targets -- -D warnings
+
     - name: Build
-      run: cargo build --verbose
+      run: cargo build --locked --release
+
     - name: Run tests
-      run: cargo test --verbose
+      run: |
+        cargo test --locked
+        cargo test --locked --release
+
+    - name: Build documentation
+      env:
+        RUSTDOCFLAGS: -D warnings
+      run: cargo doc --locked --no-deps
+
+    - name: Run Python compatibility tests
+      run: >-
+        DB3_BINARY="$PWD/target/release/kubectl-db3"
+        python3 -m unittest discover -s tests -v
+
+  msrv:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+    - uses: actions/checkout@v4
+
+    - name: Install minimum supported toolchain
+      uses: dtolnay/rust-toolchain@1.85
+
+    - name: Cache cargo registry and build artifacts
+      uses: Swatinem/rust-cache@v2
+
+    - name: Build on the MSRV declared in Cargo.toml
+      run: cargo build --locked
