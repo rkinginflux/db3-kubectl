@@ -1,0 +1,7 @@
+__pycache__/
+*.py[cod]
+db3-support-*/
+support-bundle/
+/target/
+/kubectl-db3
+/kubectl-db3.new

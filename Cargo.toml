@@ -1,0 +1,13 @@
+[package]
+name = "kubectl-db3"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.85"
+description = "Private InfluxDB 3 Enterprise support bundles via kubectl"
+license = "MIT"
+
+[dependencies]
+clap = { version = "4", features = ["derive", "env"] }
+serde_json = "1"
+chrono = { version = "0.4", default-features = false, features = ["clock"] }
+tempfile = "3"
