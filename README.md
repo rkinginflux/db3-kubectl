@@ -6,10 +6,10 @@ This project is not an official product of InfluxData. See [trademark usage and 
 
 ## Requirements
 
-- kubectl on the administrator's PATH and a compiled `kubectl-db3` binary for your platform (Linux/macOS). Rust/Cargo is needed to build from source; Python 3 is needed only for the optional compatibility-test harness. Node.js is needed only to rebuild the embedded console frontend.
+- kubectl on the administrator's PATH and a compiled `kubectl-db3` binary for your platform (Linux/macOS). Rust/Cargo is needed to build from source; Python 3 is needed only for the optional compatibility-test harness. Node.js 22.12+ (22.x or 24+) is needed only to rebuild/test the embedded console frontend.
 - For JSON support collection: a kubeconfig with permission to create `pods/exec` sessions, `sh` and `influxdb3` on PATH in the selected container, and a server reachable by that container's CLI (normally http://127.0.0.1:8181). The container's host/TLS environment is honored. The plugin does not port-forward or discover credentials.
 - For log collection: permission to list pods and read `pods/log` in the selected namespace. No database CLI or admin token is required.
-- For the environment console: read access to nodes, pods, services, workloads, EndpointSlices, storage objects, events, ConfigMaps, and (unless `--no-secrets`) Secrets. `helm` is optional and only affects the Helm panel.
+- For the environment console: read access to nodes, pods, services, workloads, EndpointSlices, storage objects, events, and ConfigMaps. Secret collection is off by default; `--include-secret-metadata` opts into names/keys and needs separately reviewed Secret permissions. Helm is disabled unless `--helm` explicitly allows Helm storage Secret reads under your credentials; this is independent of `--include-secret-metadata`. `--no-secrets` conflicts with both opt-ins.
 
 ## Build and enable locally
 
@@ -168,7 +168,7 @@ be changed:
 
 ```sh
 kubectl db3 webui --port 9300                 # another port
-kubectl db3 webui --address 0.0.0.0 --port 9191  # share on the LAN (warns)
+kubectl db3 webui --helm                    # opt in to Helm storage Secret reads
 kubectl db3 webui -n influxdb3 --context lab  # narrow scope
 kubectl db3 webui --no-secrets                # never read Secret objects
 ```
@@ -195,11 +195,15 @@ and usable as `--as=system:serviceaccount:db3-webui:db3-webui`.
 
 Secret **values** never enter a snapshot: `data`/`stringData` are dropped while
 the object is converted, so only namespace, name, type, and key names remain.
-Environment and ConfigMap values whose names look like credentials (token,
-secret, password, key, JWT, license) are replaced with `[redacted]`, and exported
+All inline environment values, references, displayed command arguments, and
+ConfigMap values are replaced with `[redacted]`, and exported
 admin tokens are redacted from log output. `kubectl` must still receive Secret
 objects from the API server to list their keys, because RBAC has no
-metadata-only verb for them; use `--no-secrets` if that is unacceptable.
+metadata-only verb for them. Neither direct Secret collection nor Helm runs by
+default. `--include-secret-metadata` allows direct Secret reads; independently,
+`--helm` allows Helm to read/decode Secret-backed release storage, including
+stored values. `--no-secrets` explicitly prevents either opt-in. The base RBAC
+never grants Secret reads.
 
 The UI is a React single-page app embedded in the binary (no Node runtime and no
 network fetch at run time). Dark is the default theme; the header toggle (or `t`)

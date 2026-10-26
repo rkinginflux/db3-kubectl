@@ -35,12 +35,14 @@ listening socket closes with the process, so nothing keeps serving.
 | Flag | Default | Meaning |
 | --- | --- | --- |
 | `--port` | `9191` | TCP port. `0` lets the OS choose; the resolved port is printed. |
-| `--address` | `127.0.0.1` | Bind address. Non-loopback values print a warning. |
+| `--address` | `127.0.0.1` | Bind address. Only loopback IPs or `localhost`; remote and unspecified addresses are rejected. |
 | `-n, --namespace` | all | Restrict collection to one namespace. |
 | `--context` | current | kubeconfig context to read. |
 | `--refresh` | `10` | Seconds a snapshot stays cached before a rebuild. |
 | `--timeout` | `60` | Per-collector timeout in seconds. |
-| `--no-secrets` | off | Never request Secret objects at all. |
+| `--include-secret-metadata` | off | Opt in to Secret names/type/key names; values are discarded, but Kubernetes requires full Secret read permission. |
+| `--no-secrets` | default behavior | Explicitly prohibit direct and Helm storage Secret reads; conflicts with both opt-ins. |
+| `--helm` | off | Explicitly allow Helm release collection, which may read/decode Secret-backed storage using operator credentials; independent of `--include-secret-metadata`. |
 | `--manifest` | off | Print the read-only RBAC manifest and exit. |
 
 The browser can request a forced rebuild (`/api/snapshot?refresh=1`), but the
@@ -69,13 +71,16 @@ the snapshot.
 | `persistentvolumeclaims` | `kubectl get persistentvolumeclaims [-A] -o json` |
 | `networkpolicies` | `kubectl get networkpolicies [-A] -o json` |
 | `events` | `kubectl get events [-A] -o json` |
-| `helm` | `helm list -A -o json` |
+| `helm` | `helm list -A -o json` (only with `--helm`) |
 | `configmaps` | `kubectl get configmaps -n <db3 namespace> -o json` |
-| `secrets` | `kubectl get secrets -n <db3 namespace> -o json` (`--no-secrets` skips) |
+| `secrets` | `kubectl get secrets -n <db3 namespace> -o json` (only with `--include-secret-metadata`) |
 
 Configuration is scoped to namespaces that actually contain InfluxDB 3 pods.
-That keeps a snapshot small on large clusters and avoids reading unrelated
-application configuration.
+At most 16 namespaces are processed sequentially, one parsed raw result at a
+time. ConfigMaps and opt-in Secret metadata share 500 rows and a 1 MiB
+serialized-row budget (measured after value masking, including delimiters). Any
+namespace, row, byte or per-resource truncation keeps a visible partial/error
+configuration status while retaining bounded returned data.
 
 ### How InfluxDB 3 objects are recognised
 
@@ -93,14 +98,23 @@ store comes from `--object-store=`. License presence is derived from
 `*LICENSE*` environment names (never their secret values) plus
 `INFLUXDB3_LICENSE_TYPE`/`_EMAIL` when they are literal values.
 
-Workload desired counts come from the owning StatefulSet/Deployment/DaemonSet,
-so a scaled-down role is visible even when no pod exists to count.
+Role desired counts use only observed pod owner kind/name plus namespace,
+never same-role workload labels. Verified distinct owners are summed once;
+with multiple owners the singular workload field remains null. Missing or
+ambiguous owner chains (including ReplicaSet-to-Deployment) leave workload and
+desired null, displayed as unknown. A role with no observed pods is not inferred.
 
 ## HTTP API
 
-The console serves four JSON endpoints plus the app shell. All are GET, bound
-to the same origin; there is no CORS grant and no auth token, which is why the
-default bind is loopback.
+The console preserves its four API endpoints plus the app shell (GET/HEAD;
+other methods return 405). All API requests, including health and manifest,
+require `X-DB3-Session`. A cryptorandom 256-bit per-run session is bootstrapped
+in the app shell's `db3-session` meta tag, never in a URL or terminal log.
+The frontend supplies the header automatically. Reload after restarting the
+command. Host must equal the printed bound authority, including the actual
+port chosen for `--port 0`; an Origin, when supplied, must match that exact
+HTTP origin. There is no CORS grant. This is local-browser protection, not a
+multi-user authentication system: another local process can fetch the shell.
 
 | Path | Purpose |
 | --- | --- |
@@ -120,21 +134,27 @@ return JSON 404 instead of the app shell.
 - Secret `data`/`stringData` is dropped as each Secret object is converted; the
   snapshot carries only namespace, name, type, key names, and age.
   `secret_values_exposed` is false in every payload.
-- Environment values whose names look like credentials (`TOKEN`, `SECRET`,
-  `PASSWORD`, `CREDENTIAL`, `PRIVATE_KEY`, `ACCESS_KEY`, `API_KEY`, `JWT`,
-  `LICENSE`, `AUTH`) are replaced with `[redacted]`. A small allowlist keeps
-  operational values visible (`INFLUXDB3_MODE`, `INFLUXDB3_OBJECT_STORE`,
-  `INFLUXDB3_BUCKET`, `INFLUXDB3_LICENSE_TYPE`, and similar).
-- `valueFrom` references become `<secret name/key>` or `<configMap name/key>`
-  so you can see provenance without the value.
-- ConfigMap values matching the same credential patterns are replaced with
-  `[redacted]`; other values are truncated to 2000 characters.
+- All inline environment values, valueFrom references, displayed command
+  arguments, and ConfigMap values are `[redacted]`. Opaque values are hidden
+  even when the variable/key name looks harmless. Safe derived database mode,
+  cluster ID, object-store, and license-presence observations are computed
+  before display sanitization, preserving database details without raw values.
+- Raw collector stderr is discarded, not forwarded to errors or the logs API.
+  Errors are generic status/timeout/limit messages, never arbitrary client text.
 - If `INFLUXDB3_TOKEN` is exported, exact, JSON-escaped, and UTF-16-escaped
   occurrences are redacted from captured log output.
-- The collector still asks the API server for Secret objects (RBAC has no
-  metadata-only verb). Their values reach the local `kubectl` process and this
-  process's memory before being discarded; they are never serialised, logged,
-  or cached. Use `--no-secrets` if that is not acceptable.
+- By default neither Secret objects nor Helm releases are requested: Helm is not
+  executed at all. With `--include-secret-metadata`,
+  full Secret objects reach kubectl and process memory before values are
+  discarded: Kubernetes RBAC has no metadata-only Secret permission. Names
+  and key names are deliberately exposed only by this explicit opt-in.
+  Independently, `--helm` explicitly permits Helm to read/decode its storage
+  Secrets (including stored values) under your credentials, though those values
+  are not returned in the console snapshot. `--no-secrets` conflicts with both
+  opt-ins; `--include-secret-metadata --helm` can be used together.
+- Application logs may contain unknown credentials that cannot be identified
+  automatically. Known exported `INFLUXDB3_TOKEN` is redacted from snapshot and
+  log payloads; treat all displayed logs/cluster metadata as private.
 
 ## The RBAC manifest
 
@@ -162,8 +182,10 @@ To read through that identity instead of your personal kubeconfig:
 kubectl --as=system:serviceaccount:db3-webui:db3-webui get pods -A
 ```
 
-There are no write verbs. The Secret grant is the one to review before using
-this outside a lab, because RBAC cannot restrict it to metadata.
+There are no write/exec verbs and no Secret grants in the base manifest.
+Opt-in `--helm` may need separately reviewed storage Secret reads; a failed Helm panel
+is not a reason to grant broad Secret access. Review any separately scoped
+permission before opting in. The command never automatically applies RBAC.
 
 ## Frontend
 
@@ -174,8 +196,13 @@ toolchain; rebuild it after changing anything under `webui/src`:
 
 ```sh
 cd webui
+# Node 22.12+ (22.x or 24+), never needed at runtime
 npm ci
+npm test
+npm run typecheck
 npm run build
+npm run check:reproducible
+npm audit
 cd ..
 cargo build --locked --release
 ```
@@ -186,9 +213,12 @@ Events, Logs. The theme toggle (or `t`) switches light/dark; dark is the default
 and the choice is stored in `localStorage`. `r` refreshes. Routes are hashes
 (`#topology`), so a bookmark survives a reload.
 
-The page is served with `Content-Security-Policy` limited to inline scripts and
-styles from the same origin, `X-Frame-Options: DENY`, `nosniff`, and
-`no-referrer`. API responses are `no-store`.
+The server adds a cryptorandom CSP nonce to the singlefile's inline scripts;
+`script-src` permits that nonce, not `unsafe-inline`. Style `unsafe-inline`
+is intentionally retained for the existing React inline styles and bundled
+CSS. Responses are no-store, deny framing, use nosniff and no-referrer, and
+never grant CORS. The complete license and third-party notices are embedded
+in the HTML legal template; no CDN or Node runtime is needed.
 
 ## Troubleshooting
 
@@ -209,8 +239,10 @@ empty by design rather than guessing.
 forbidden by RBAC on older clusters. Check the Collectors panel for that
 collector's error.
 
-**Helm releases missing.** `helm` is an optional client-side dependency. If it
-is absent, only that panel is empty; the collector error explains why.
+**Helm releases missing.** Collection is disabled by default; the Helm view says
+"disabled; enable --helm", not that no releases exist. Opt in only after
+reviewing Helm storage Secret reads. With `--helm`, a missing client or denied
+read is a collector failure, not proof the cluster has no releases.
 
 **Config panel says "configuration collection was skipped".** No pod matched
 the InfluxDB image check, so no namespace was considered a database namespace.
@@ -228,5 +260,25 @@ contain a recognised database pod).
   previous container instances are not retrieved.
 - The console reflects what RBAC allows. A denied collector is reported, not
   retried with broader permissions.
-- There is no authentication. Keep the loopback default; binding to `0.0.0.0`
-  exposes the snapshot to anyone who can reach the port.
+- Session/authority checks protect against remote web origins, not hostile
+  local processes or malicious browser extensions. Non-loopback binds are
+  rejected rather than supported as an anonymous remote service.
+- Resource arrays are capped at 500 entries and service matching at 50,000
+  comparisons with visible partial/truncation findings. The browser topology
+  caps each input column at 80, edges at 500, and relationship/selector work at
+  20,000. Its partial notice includes unmapped ownership. Only observed
+  namespace + owner kind/name links are used, not same-role guesses;
+  ReplicaSet-to-Deployment ancestry is not collected.
+- A missing role means not observed in this scope, not proof it is absent.
+- WebUI collectors have a 4 MiB stdout limit, timeout and cancellation checks.
+  Their process groups are killed before reaping direct children, including
+  successful leaders with background descendants. SIGINT and SIGTERM cancel
+  active collection and join request workers before exit. HTTP sockets have a
+  two-second idle I/O timeout on the supported Unix hosts (not a total header
+  wall-clock deadline for clients that continually send bytes). At most 16
+  application request workers run concurrently. Body-bearing framing is rejected
+  with 400 and connection close before body-reader creation: positive/malformed
+  Content-Length and any Transfer-Encoding are forbidden (zero length is fine).
+  Request/header lines are limited to 8 KiB, the header section to 32 KiB and
+  header fields to 64 through the opt-in vendored `db3-read-only` feature. Support bundle capture uses
+  its original implementation and is not changed by these WebUI limits.

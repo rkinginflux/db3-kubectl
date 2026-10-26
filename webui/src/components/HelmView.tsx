@@ -64,6 +64,12 @@ export function HelmView({ snapshot }: { snapshot: Snapshot }) {
   const degraded = snapshot.helm.filter((release) => release.status.toLowerCase() !== "deployed");
   const collectors = snapshot.collectors.filter((collector) => collector.name.startsWith("helm"));
 
+  if (!snapshot.helm_enabled) {
+    return <Card title="Helm releases" subtitle="Collection is opt-in">
+      <Empty glyph="⎈">Helm disabled; enable --helm to collect releases. This explicitly allows Helm storage Secret reads using your operator credentials; the base RBAC grants no Secret reads.</Empty>
+    </Card>;
+  }
+
   return (
     <>
       <div className="toolbar">
@@ -101,8 +107,7 @@ export function HelmView({ snapshot }: { snapshot: Snapshot }) {
 
       <Card title="What the console does with Helm data" subtitle="Read-only by design">
         <p className="muted" style={{ margin: 0, fontSize: 12.5 }}>
-          The console runs <code>helm list -A -o json</code> with your current kubeconfig. It does not render charts, read release values,
-          or expose release secrets. Chart pins and revision numbers are enough to compare a running deployment with the values file you
+          The console runs <code>helm list -A -o json</code> with your current kubeconfig. Helm may read and decode Secret-backed release storage with your credentials, including stored values. The console does not expose those values or render charts. Chart pins and revision numbers are enough to compare a running deployment with the values file you
           keep in source control; use <code>helm get values</code> yourself when you need the exact overlay.
         </p>
       </Card>

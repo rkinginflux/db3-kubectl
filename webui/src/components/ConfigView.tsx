@@ -65,7 +65,7 @@ export function ConfigView({ snapshot }: { snapshot: Snapshot }) {
     },
     {
       key: "keys",
-      label: "Keys (values never read)",
+      label: "Keys (values discarded)",
       render: (row) => (
         <div className="key-list">
           {row.keys.map((key) => (
@@ -140,11 +140,10 @@ export function ConfigView({ snapshot }: { snapshot: Snapshot }) {
       </div>
 
       <div className="error-banner" style={{ borderColor: "color-mix(in srgb, var(--warn) 40%, transparent)", background: "var(--warn-soft)", color: "var(--warn)" }}>
-        Read-only view. Secret values are never requested into the snapshot, and environment values matching token, password, key, or
-        license patterns are masked before they leave the local server.
+        Secret collection is off by default. Opt in with --include-secret-metadata to show names and keys; Kubernetes still reads full Secret objects before values are discarded. All ConfigMap and environment values are masked before display.
       </div>
 
-      <Card title="ConfigMaps" subtitle="Keys and inline values from the collected namespaces" tight>
+      <Card title="ConfigMaps" subtitle="Keys from the collected namespaces; opaque values hidden" tight>
         {configmaps.length === 0 ? (
           <Empty glyph="▤">No ConfigMaps in scope</Empty>
         ) : (
@@ -174,12 +173,12 @@ export function ConfigView({ snapshot }: { snapshot: Snapshot }) {
           rowKey={(row) => `${row.namespace}/${row.name}`}
           searchText={(row) => `${row.namespace} ${row.name} ${row.type} ${row.keys.join(" ")}`}
           searchPlaceholder="Filter secrets…"
-          emptyMessage="No Secrets in scope"
+          emptyMessage="Secret collection disabled by default, or no Secrets observed in scope"
           pageSize={30}
         />
       </Card>
 
-      <Card title="Container environment" subtitle="Effective env for the collected pods, with credential-shaped values masked" tight>
+      <Card title="Container environment" subtitle="Collected env names; all inline and referenced values masked" tight>
         <DataTable
           rows={envRows}
           columns={envColumns}

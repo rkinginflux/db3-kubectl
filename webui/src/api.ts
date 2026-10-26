@@ -5,6 +5,12 @@ export interface SnapshotParams {
   refresh: boolean;
 }
 
+function request(path: string): Promise<Response> {
+  const session = document.querySelector<HTMLMetaElement>('meta[name="db3-session"]')?.content;
+  if (!session || session.startsWith("__DB3_")) throw new Error("Console session unavailable; reload the page");
+  return fetch(path, { cache: "no-store", credentials: "omit", headers: { Accept: "application/json", "X-DB3-Session": session } });
+}
+
 async function json<T>(response: Response): Promise<T> {
   if (!response.ok) {
     const text = await response.text();
@@ -18,7 +24,7 @@ export async function fetchSnapshot(params: SnapshotParams): Promise<Snapshot> {
   if (params.namespace) search.set("namespace", params.namespace);
   if (params.refresh) search.set("refresh", "1");
   const suffix = search.toString() ? `?${search}` : "";
-  return json<Snapshot>(await fetch(`/api/snapshot${suffix}`, { headers: { Accept: "application/json" } }));
+  return json<Snapshot>(await request(`/api/snapshot${suffix}`));
 }
 
 export async function fetchLogs(
@@ -29,9 +35,9 @@ export async function fetchLogs(
 ): Promise<LogsResponse> {
   const search = new URLSearchParams({ namespace, pod, tail: String(tail) });
   if (container) search.set("container", container);
-  return json<LogsResponse>(await fetch(`/api/logs?${search}`, { headers: { Accept: "application/json" } }));
+  return json<LogsResponse>(await request(`/api/logs?${search}`));
 }
 
 export async function fetchHealth(): Promise<{ ok: boolean; version: string }> {
-  return json(await fetch("/api/health"));
+  return json(await request("/api/health"));
 }

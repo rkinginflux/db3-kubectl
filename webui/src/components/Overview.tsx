@@ -34,7 +34,7 @@ export function Overview({ snapshot }: { snapshot: Snapshot }) {
           value={`${workloadsReady}/${snapshot.workloads.length}`}
           note="StatefulSets, Deployments, DaemonSets"
         />
-        <Stat label="Helm releases" value={releases.size} note={snapshot.helm.length ? "across all namespaces" : "helm not available"} />
+        <Stat label="Helm releases" value={snapshot.helm_enabled ? releases.size : "—"} note={snapshot.helm_enabled ? "reported releases" : "disabled; enable --helm"} />
         <Stat label="Namespaces in use" value={namespaceCount} note={`${snapshot.pods.length} pods observed`} />
         <Stat
           label="Open findings"
@@ -73,7 +73,7 @@ export function Overview({ snapshot }: { snapshot: Snapshot }) {
 
         <Card title="Findings" subtitle="Derived from live object status — not a substitute for alerting">
           {snapshot.issues.length === 0 ? (
-            <Empty glyph="✓">Every collected object reported a healthy state.</Empty>
+            <Empty glyph="✓">No issues detected in available observations. Missing or failed sources and unobserved objects are not evidence of health.</Empty>
           ) : (
             <div className="stack">
               {snapshot.issues.slice(0, 8).map((issue, index) => (
@@ -119,7 +119,7 @@ export function Overview({ snapshot }: { snapshot: Snapshot }) {
                       <div className="row between" style={{ fontSize: 12 }}>
                         <span style={{ textTransform: "capitalize" }}>{role.role}</span>
                         <span className="muted mono">
-                          {role.ready}/{role.desired}
+                          {role.ready}/{role.desired ?? "?"}
                         </span>
                       </div>
                       <div className={`meter ${role.ready === role.desired ? "" : role.ready === 0 ? "danger" : "warn"}`}>

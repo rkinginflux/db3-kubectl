@@ -15,6 +15,7 @@ use std::{
 
 mod collect;
 mod webui;
+mod webui_process;
 
 const REMOTE: &str = "IFS= read -r token\nif [ -n \"$token\" ]; then\n    exec influxdb3 \"$@\" --token \"$token\"\nfi\nexec influxdb3 \"$@\"\n";
 const COMMANDS: &[(&str, &[&str])] = &[

@@ -14,6 +14,8 @@ pub struct Options {
     pub context: Option<String>,
     pub timeout: f64,
     pub no_secrets: bool,
+    pub helm: bool,
+    pub stop: std::sync::Arc<std::sync::atomic::AtomicBool>,
 }
 
 struct Job {
@@ -44,6 +46,36 @@ impl Outcome {
     }
 }
 
+const RESOURCE_LIMIT: usize = 500;
+const SELECTOR_BUDGET: usize = 50_000;
+// Shared across ConfigMaps and opt-in Secret metadata. Only one raw job result
+// is retained at a time; command output is separately bounded by capture().
+const CONFIG_NAMESPACE_LIMIT: usize = 16;
+const CONFIG_ROW_LIMIT: usize = 500;
+const CONFIG_BYTE_LIMIT: usize = 1024 * 1024;
+
+fn bound_arrays(value: &mut Value) -> bool {
+    let mut truncated = false;
+    match value {
+        Value::Array(rows) => {
+            if rows.len() > RESOURCE_LIMIT {
+                rows.truncate(RESOURCE_LIMIT);
+                truncated = true;
+            }
+            for row in rows {
+                truncated |= bound_arrays(row);
+            }
+        }
+        Value::Object(object) => {
+            for value in object.values_mut() {
+                truncated |= bound_arrays(value);
+            }
+        }
+        _ => {}
+    }
+    truncated
+}
+
 fn run_job(job: Job, opts: &Options) -> Outcome {
     let started = Instant::now();
     let mut argv = Vec::with_capacity(job.args.len() + 2);
@@ -52,7 +84,8 @@ fn run_job(job: Job, opts: &Options) -> Outcome {
         argv.push(context.to_owned());
     }
     argv.extend(job.args);
-    let captured = match crate::capture(job.program, &argv, None, opts.timeout) {
+    let captured = match crate::webui_process::capture(job.program, &argv, opts.timeout, &opts.stop)
+    {
         Ok(captured) => captured,
         Err(error) => {
             return Outcome {
@@ -69,7 +102,8 @@ fn run_job(job: Job, opts: &Options) -> Outcome {
         };
     }
     match serde_json::from_str::<Value>(&captured.stdout) {
-        Ok(value) => {
+        Ok(mut value) => {
+            let truncated = bound_arrays(&mut value);
             let count = match &value {
                 Value::Array(rows) => rows.len(),
                 _ => value
@@ -79,8 +113,10 @@ fn run_job(job: Job, opts: &Options) -> Outcome {
             };
             Outcome {
                 name: job.name,
-                ok: true,
-                error: None,
+                ok: !truncated,
+                error: truncated.then(|| {
+                    "resource list truncated at 500 entries; observations are partial".to_owned()
+                }),
                 duration_ms,
                 count,
                 value: Some(value),
@@ -523,7 +559,19 @@ fn total_restarts(pod: &Value) -> u64 {
 fn owner_of(pod: &Value) -> (Option<String>, Option<String>) {
     at(pod, &["metadata", "ownerReferences"])
         .and_then(Value::as_array)
-        .and_then(|owners| owners.first())
+        .and_then(|owners| {
+            let controllers: Vec<_> = owners
+                .iter()
+                .filter(|owner| owner["controller"] == true)
+                .collect();
+            if controllers.len() == 1 {
+                Some(controllers[0])
+            } else if controllers.is_empty() && owners.len() == 1 {
+                owners.first()
+            } else {
+                None
+            }
+        })
         .map_or((None, None), |owner| {
             (
                 text(owner, &["kind"]).map(str::to_owned),
@@ -933,7 +981,7 @@ fn namespace_scoped(opts: &Options, mut args: Vec<String>) -> Vec<String> {
 }
 
 pub fn snapshot(opts: &Options) -> Value {
-    let phase_one = vec![
+    let mut phase_one = vec![
         Job {
             name: "kubectl-version",
             program: "kubectl",
@@ -1081,7 +1129,9 @@ pub fn snapshot(opts: &Options) -> Value {
                 ],
             ),
         },
-        Job {
+    ];
+    if opts.helm {
+        phase_one.push(Job {
             name: "helm",
             program: "helm",
             args: {
@@ -1097,8 +1147,8 @@ pub fn snapshot(opts: &Options) -> Value {
                 }
                 args
             },
-        },
-    ];
+        });
+    }
     let results = run_jobs(phase_one, opts);
     let find = |name: &str| results.iter().find(|outcome| outcome.name == name);
 
@@ -1168,6 +1218,22 @@ pub fn snapshot(opts: &Options) -> Value {
         .unwrap_or_default();
 
     let mut issues: Vec<Value> = Vec::new();
+    for outcome in &results {
+        if outcome
+            .error
+            .as_deref()
+            .is_some_and(|e| e.contains("truncated"))
+        {
+            push_issue(
+                &mut issues,
+                "warning",
+                format!("{} collection truncated", outcome.name),
+                "Resource limit reached; observations are partial, not evidence of absence."
+                    .to_owned(),
+                None,
+            );
+        }
+    }
     for node in &nodes {
         if node["ready"] != Value::Bool(true) {
             push_issue(
@@ -1182,6 +1248,9 @@ pub fn snapshot(opts: &Options) -> Value {
     }
 
     for pod in &pods {
+        if opts.stop.load(std::sync::atomic::Ordering::SeqCst) {
+            return json!({"error":"collection cancelled"});
+        }
         let namespace = pod["namespace"].as_str().unwrap_or("default");
         let name = pod["name"].as_str().unwrap_or("?");
         let phase = pod["phase"].as_str().unwrap_or("Unknown");
@@ -1252,7 +1321,12 @@ pub fn snapshot(opts: &Options) -> Value {
         .and_then(|outcome| outcome.value.as_ref())
         .map(|value| items(value).iter().map(service_row).collect())
         .unwrap_or_default();
+    let mut comparisons = 0usize;
+    let mut selector_partial = false;
     for service in &mut services {
+        if opts.stop.load(std::sync::atomic::Ordering::SeqCst) {
+            return json!({"error":"collection cancelled"});
+        }
         let namespace = service["namespace"]
             .as_str()
             .unwrap_or("default")
@@ -1268,10 +1342,22 @@ pub fn snapshot(opts: &Options) -> Value {
         let matched: Vec<&Value> = pods
             .iter()
             .filter(|pod| {
+                if comparisons >= SELECTOR_BUDGET
+                    || opts.stop.load(std::sync::atomic::Ordering::SeqCst)
+                {
+                    selector_partial = true;
+                    return false;
+                }
+                comparisons += 1;
                 pod["namespace"].as_str() == Some(namespace.as_str())
-                    && selector
-                        .iter()
-                        .all(|(key, value)| pod["labels"].get(key) == Some(value))
+                    && selector.iter().all(|(key, value)| {
+                        comparisons += 1;
+                        if comparisons > SELECTOR_BUDGET {
+                            selector_partial = true;
+                            return false;
+                        }
+                        pod["labels"].get(key) == Some(value)
+                    })
             })
             .collect();
         if let Some(component) = matched.iter().find_map(|pod| pod["component"].as_str()) {
@@ -1280,7 +1366,7 @@ pub fn snapshot(opts: &Options) -> Value {
         if let Some(cluster) = matched.iter().find_map(|pod| pod["cluster_id"].as_str()) {
             service["cluster_id"] = Value::String(cluster.to_owned());
         }
-        if matched.is_empty() {
+        if matched.is_empty() && !selector_partial {
             push_issue(
                 &mut issues,
                 "warning",
@@ -1291,6 +1377,16 @@ pub fn snapshot(opts: &Options) -> Value {
         }
     }
 
+    if selector_partial {
+        push_issue(
+            &mut issues,
+            "warning",
+            "Service matching truncated".to_owned(),
+            "50,000 selector comparison budget reached; routing observations are partial."
+                .to_owned(),
+            None,
+        );
+    }
     let claims: Vec<Value> = find("persistentvolumeclaims")
         .and_then(|outcome| outcome.value.as_ref())
         .map(|value| {
@@ -1417,6 +1513,9 @@ pub fn snapshot(opts: &Options) -> Value {
     // ---------------------------------------------- configuration collection
     let mut config_namespaces: BTreeSet<String> = BTreeSet::new();
     for pod in &pods {
+        if opts.stop.load(std::sync::atomic::Ordering::SeqCst) {
+            return json!({"error":"collection cancelled"});
+        }
         if pod["component"].is_string() {
             if let Some(namespace) = pod["namespace"].as_str() {
                 config_namespaces.insert(namespace.to_owned());
@@ -1430,46 +1529,70 @@ pub fn snapshot(opts: &Options) -> Value {
         config_errors
             .push("no InfluxDB 3 pods found; configuration collection was skipped".to_owned());
     } else {
-        let mut jobs: Vec<Job> = Vec::new();
-        for namespace in &config_namespaces {
-            jobs.push(Job {
-                name: "configmaps",
-                program: "kubectl",
-                args: vec![
-                    "get".to_owned(),
-                    "configmaps".to_owned(),
-                    "-n".to_owned(),
-                    namespace.clone(),
-                    "-o".to_owned(),
-                    "json".to_owned(),
-                ],
-            });
-            if !opts.no_secrets {
-                jobs.push(Job {
-                    name: "secrets",
-                    program: "kubectl",
-                    args: vec![
-                        "get".to_owned(),
-                        "secrets".to_owned(),
-                        "-n".to_owned(),
-                        namespace.clone(),
-                        "-o".to_owned(),
-                        "json".to_owned(),
-                    ],
-                });
-            }
+        if config_namespaces.len() > CONFIG_NAMESPACE_LIMIT {
+            config_errors
+                .push("configuration namespace cap (16); observations are partial".to_owned());
         }
-        for outcome in run_jobs(jobs, opts) {
-            match outcome.name {
-                "configmaps" => match outcome.value.as_ref() {
-                    Some(value) => configmaps.extend(items(value).iter().map(configmap_row)),
-                    None => config_errors.extend(outcome.error.clone()),
-                },
-                "secrets" => match outcome.value.as_ref() {
-                    Some(value) => secrets.extend(items(value).iter().map(secret_row)),
-                    None => config_errors.extend(outcome.error.clone()),
-                },
-                _ => {}
+        let mut config_bytes = 4usize; // two JSON array delimiters
+        'namespaces: for namespace in config_namespaces.iter().take(CONFIG_NAMESPACE_LIMIT) {
+            for resource in ["configmaps", "secrets"] {
+                if resource == "secrets" && opts.no_secrets {
+                    continue;
+                }
+                if opts.stop.load(std::sync::atomic::Ordering::SeqCst) {
+                    return json!({"error":"collection cancelled"});
+                }
+                let outcome = run_job(
+                    Job {
+                        name: resource,
+                        program: "kubectl",
+                        args: vec![
+                            "get".to_owned(),
+                            resource.to_owned(),
+                            "-n".to_owned(),
+                            namespace.clone(),
+                            "-o".to_owned(),
+                            "json".to_owned(),
+                        ],
+                    },
+                    opts,
+                );
+                config_errors.extend(outcome.error);
+                if let Some(value) = outcome.value {
+                    for item in items(&value) {
+                        if opts.stop.load(std::sync::atomic::Ordering::SeqCst) {
+                            return json!({"error":"collection cancelled"});
+                        }
+                        let mut row = if resource == "configmaps" {
+                            configmap_row(item)
+                        } else {
+                            secret_row(item)
+                        };
+                        // Budget the final representation: masking a short value
+                        // can grow it. No raw configuration values are needed below.
+                        if let Some(data) = row["data"].as_object_mut() {
+                            for value in data.values_mut() {
+                                *value = json!("[redacted]");
+                            }
+                        }
+                        let bytes = serde_json::to_vec(&row)
+                            .expect("JSON value serializes")
+                            .len()
+                            + 1;
+                        if configmaps.len() + secrets.len() >= CONFIG_ROW_LIMIT
+                            || config_bytes + bytes > CONFIG_BYTE_LIMIT
+                        {
+                            config_errors.push("configuration aggregate cap (500 rows / 1 MiB serialized rows); observations are partial".to_owned());
+                            break 'namespaces;
+                        }
+                        config_bytes += bytes;
+                        if resource == "configmaps" {
+                            configmaps.push(row);
+                        } else {
+                            secrets.push(row);
+                        }
+                    }
+                }
             }
         }
         configmaps.sort_by(|left, right| {
@@ -1489,6 +1612,9 @@ pub fn snapshot(opts: &Options) -> Value {
     // ------------------------------------------------------ database clusters
     let mut clusters: BTreeMap<String, Value> = BTreeMap::new();
     for pod in &pods {
+        if opts.stop.load(std::sync::atomic::Ordering::SeqCst) {
+            return json!({"error":"collection cancelled"});
+        }
         let Some(component) = pod["component"].as_str() else {
             continue;
         };
@@ -1598,6 +1724,9 @@ pub fn snapshot(opts: &Options) -> Value {
     }
 
     for cluster in clusters.values_mut() {
+        if opts.stop.load(std::sync::atomic::Ordering::SeqCst) {
+            return json!({"error":"collection cancelled"});
+        }
         let namespace = cluster["namespace"]
             .as_str()
             .unwrap_or("default")
@@ -1633,18 +1762,48 @@ pub fn snapshot(opts: &Options) -> Value {
         let roles = cluster["roles"].as_array_mut().expect("roles");
         for role in roles.iter_mut() {
             let name = role["role"].as_str().unwrap_or("").to_owned();
-            let workload = workloads.iter().find(|workload| {
-                workload["namespace"].as_str() == Some(namespace.as_str())
-                    && workload["component"].as_str() == Some(name.as_str())
-            });
-            match workload {
-                Some(workload) => {
-                    role["workload"] = workload["name"].clone();
-                    role["desired"] = workload["desired"].clone();
+            let mut owners = BTreeSet::new();
+            let mut uncertain = false;
+            for observed in role["pods"].as_array().into_iter().flatten() {
+                let pod = pods.iter().find(|pod| {
+                    pod["namespace"].as_str() == Some(namespace.as_str())
+                        && pod["name"] == observed["name"]
+                });
+                let workload = pod.and_then(|pod| {
+                    workloads.iter().find(|workload| {
+                        workload["namespace"] == pod["namespace"]
+                            && pod["owner_kind"].is_string()
+                            && pod["owner_name"].is_string()
+                            && workload["kind"] == pod["owner_kind"]
+                            && workload["name"] == pod["owner_name"]
+                    })
+                });
+                if let Some(workload) = workload {
+                    owners.insert((
+                        workload["kind"].as_str().unwrap_or("").to_owned(),
+                        workload["name"].as_str().unwrap_or("").to_owned(),
+                    ));
+                } else {
+                    uncertain = true; // ReplicaSet -> Deployment is not inferred.
                 }
-                None => {
-                    let count = role["pods"].as_array().map_or(0, Vec::len) as u64;
-                    role["desired"] = json!(count);
+            }
+            role["desired"] = Value::Null;
+            role["workload"] = Value::Null;
+            if !uncertain && !owners.is_empty() {
+                let desired: u64 = workloads
+                    .iter()
+                    .filter(|workload| {
+                        workload["namespace"].as_str() == Some(namespace.as_str())
+                            && owners.contains(&(
+                                workload["kind"].as_str().unwrap_or("").to_owned(),
+                                workload["name"].as_str().unwrap_or("").to_owned(),
+                            ))
+                    })
+                    .map(|workload| workload["desired"].as_u64().unwrap_or(0))
+                    .sum();
+                role["desired"] = json!(desired);
+                if owners.len() == 1 {
+                    role["workload"] = json!(owners.first().expect("nonempty owners").1);
                 }
             }
             let ready = role["ready"].as_u64().unwrap_or(0);
@@ -1666,9 +1825,9 @@ pub fn snapshot(opts: &Options) -> Value {
             push_issue(
                 &mut issues,
                 "warning",
-                format!("Cluster {cluster_id} has no querier"),
+                format!("Querier not observed in collected scope for cluster {cluster_id}"),
                 format!(
-                    "{namespace}: SQL and InfluxQL queries will fail without a querier workload."
+                    "{namespace}: role detection is heuristic and collection may be partial; check deployment configuration before drawing conclusions about query availability."
                 ),
                 Some(namespace.as_str()),
             );
@@ -1707,7 +1866,7 @@ pub fn snapshot(opts: &Options) -> Value {
     collectors.push(json!({
         "name": "configuration",
         "ok": config_errors.is_empty(),
-        "error": config_errors.first(),
+        "error": (!config_errors.is_empty()).then(|| config_errors.join("; ")),
         "duration_ms": 0,
         "count": configmaps.len() + secrets.len(),
     }));
@@ -1715,7 +1874,7 @@ pub fn snapshot(opts: &Options) -> Value {
     let mut db3: Vec<Value> = clusters.into_values().collect();
     db3.sort_by(|left, right| left["key"].as_str().cmp(&right["key"].as_str()));
 
-    json!({
+    let mut result = json!({
         "generated_at": chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
         "tool_version": env!("CARGO_PKG_VERSION"),
         "context": context_name,
@@ -1736,6 +1895,7 @@ pub fn snapshot(opts: &Options) -> Value {
             "claims": claims,
         },
         "helm": helm,
+        "helm_enabled": opts.helm,
         "configmaps": configmaps,
         "secrets": secrets,
         "secret_values_exposed": false,
@@ -1744,5 +1904,24 @@ pub fn snapshot(opts: &Options) -> Value {
         "db3": db3,
         "issues": issues,
         "collectors": collectors,
-    })
+    });
+    // Derive database observations above before removing opaque values. Raw
+    // command arguments and inline env values are not a safe display surface.
+    for pod in result["pods"].as_array_mut().into_iter().flatten() {
+        for container in pod["containers"].as_array_mut().into_iter().flatten() {
+            container["commands"] = json!(["[redacted]"]);
+            for env in container["env"].as_array_mut().into_iter().flatten() {
+                env["value"] = json!("[redacted]");
+                env["redacted"] = json!(true);
+            }
+        }
+    }
+    for config in result["configmaps"].as_array_mut().into_iter().flatten() {
+        if let Some(data) = config["data"].as_object_mut() {
+            for value in data.values_mut() {
+                *value = json!("[redacted]");
+            }
+        }
+    }
+    result
 }

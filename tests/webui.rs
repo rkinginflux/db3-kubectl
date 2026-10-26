@@ -39,6 +39,7 @@ fn kubectl_script() -> &'static str {
     r#"#!/bin/sh
 DIR="$(dirname "$0")"
 args="$*"
+printf '%s\n' "$*" >> "$DIR/kubectl-calls"
 case "$args" in
   *"version -o json"*) cat "$DIR/version.json" ;;
   *"config view"*) cat "$DIR/kubeconfig.json" ;;
@@ -64,6 +65,7 @@ esac
 fn helm_script() -> &'static str {
     r#"#!/bin/sh
 DIR="$(dirname "$0")"
+printf '%s\n' "$*" >> "$DIR/helm-calls"
 case "$*" in
   *"list -A -o json"*) cat "$DIR/helm.json" ;;
   *) echo "fake helm: unsupported args: $*" >&2; exit 1 ;;
@@ -232,26 +234,357 @@ fn start(dir: &Path, extra: &[&str]) -> Server {
 }
 
 fn http(port: u16, path: &str) -> (u16, String) {
+    let host = format!("Host: 127.0.0.1:{port}\r\n");
+    let (_, page) = raw_http(port, "/", &host);
+    let session = page
+        .split("name=\"db3-session\" content=\"")
+        .nth(1)
+        .expect("session bootstrap")
+        .split('"')
+        .next()
+        .unwrap();
     let mut stream = TcpStream::connect(("127.0.0.1", port)).expect("connect to console");
     stream
         .set_read_timeout(Some(Duration::from_secs(15)))
         .unwrap();
     write!(
         stream,
-        "GET {path} HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n"
+        "GET {path} HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nX-DB3-Session: {session}\r\nConnection: close\r\n\r\n"
+    )
+    .unwrap();
+    let mut raw = Vec::new();
+    stream.read_to_end(&mut raw).unwrap();
+    let split = raw.windows(4).position(|w| w == b"\r\n\r\n").unwrap();
+    let headers = std::str::from_utf8(&raw[..split]).unwrap();
+    let status = headers.split_whitespace().nth(1).unwrap().parse().unwrap();
+    let mut bytes = raw[split + 4..].to_vec();
+    if headers
+        .to_lowercase()
+        .contains("transfer-encoding: chunked")
+    {
+        let mut rest = bytes.as_slice();
+        let mut decoded = Vec::new();
+        loop {
+            let split = rest.windows(2).position(|w| w == b"\r\n").unwrap();
+            let line = std::str::from_utf8(&rest[..split]).unwrap();
+            let length = usize::from_str_radix(line.split(';').next().unwrap(), 16).unwrap();
+            if length == 0 {
+                break;
+            }
+            let data = &rest[split + 2..];
+            decoded.extend_from_slice(&data[..length]);
+            rest = &data[length + 2..];
+        }
+        bytes = decoded;
+    }
+    let body = String::from_utf8(bytes).unwrap();
+    (status, body)
+}
+
+fn raw_http(port: u16, path: &str, headers: &str) -> (u16, String) {
+    raw_method(port, "GET", path, headers)
+}
+
+fn raw_method(port: u16, method: &str, path: &str, headers: &str) -> (u16, String) {
+    let mut stream = TcpStream::connect(("127.0.0.1", port)).unwrap();
+    stream
+        .set_read_timeout(Some(Duration::from_secs(15)))
+        .unwrap();
+    write!(
+        stream,
+        "{method} {path} HTTP/1.1\r\n{headers}Connection: close\r\n\r\n"
     )
     .unwrap();
     let mut raw = String::new();
     stream.read_to_string(&mut raw).unwrap();
-    let status = raw
-        .split_whitespace()
+    (raw.split_whitespace().nth(1).unwrap().parse().unwrap(), raw)
+}
+
+#[test]
+fn authority_and_session_guard_all_api_requests() {
+    let dir = fixture();
+    let server = start(dir.path(), &[]);
+    let host = format!("Host: 127.0.0.1:{}\r\n", server.port);
+    assert_eq!(raw_http(server.port, "/api/health", &host).0, 401);
+    assert_eq!(
+        raw_http(server.port, "/", "Host: attacker.example\r\n").0,
+        403
+    );
+    assert_eq!(
+        raw_http(
+            server.port,
+            "/",
+            &format!("{host}Origin: https://attacker.example\r\n")
+        )
+        .0,
+        403
+    );
+    let (_, page) = raw_http(server.port, "/", &host);
+    assert!(page.contains("name=\"db3-session\""));
+    assert!(!page.contains("__DB3_SESSION__"));
+    assert!(page.contains("script-src 'nonce-"));
+    assert!(!page.contains("script-src 'unsafe-inline'"));
+    assert_eq!(
+        page.matches("nonce=\"").count(),
+        1,
+        "inject nonce only into the real script element, not React's script-string literals"
+    );
+    let session = page
+        .split("name=\"db3-session\" content=\"")
         .nth(1)
-        .and_then(|value| value.parse().ok())
-        .unwrap_or(0);
-    let body = raw
-        .split_once("\r\n\r\n")
-        .map_or_else(String::new, |(_, body)| body.to_owned());
-    (status, body)
+        .unwrap()
+        .split('"')
+        .next()
+        .unwrap();
+    assert_eq!(
+        page.matches(session).count(),
+        1,
+        "session must occur only in the bootstrap meta, never in JS comparisons"
+    );
+}
+
+#[test]
+fn default_never_collects_secrets_and_hides_opaque_config() {
+    let dir = fixture();
+    script(
+        dir.path(),
+        "kubectl",
+        &kubectl_script().replace(
+            "cat \"$DIR/secrets.json\"",
+            "touch \"$DIR/secret-requested\"; cat \"$DIR/secrets.json\"",
+        ),
+    );
+    let mut pods: Value =
+        serde_json::from_str(&fs::read_to_string(dir.path().join("pods.json")).unwrap()).unwrap();
+    pods["items"][0]["spec"]["containers"][0]["env"]
+        .as_array_mut()
+        .unwrap()
+        .push(serde_json::json!({"name":"INNOCENT", "value":"opaque-private-value"}));
+    fs::write(dir.path().join("pods.json"), pods.to_string()).unwrap();
+    let server = start(dir.path(), &[]);
+    let value = snapshot(server.port);
+    assert!(value["secrets"].as_array().unwrap().is_empty());
+    assert!(!dir.path().join("secret-requested").exists());
+    assert!(!value.to_string().contains("opaque-private-value"));
+    assert_eq!(
+        value["configmaps"][0]["data"]["INFLUXDB3_BUCKET"],
+        "[redacted]"
+    );
+    assert_eq!(value["db3"][0]["object_store"], "s3");
+    let output = env_command(dir.path())
+        .args(["webui", "--address", "0.0.0.0", "--port", "0"])
+        .output()
+        .unwrap();
+    assert!(!output.status.success());
+}
+
+#[test]
+fn active_collection_shutdown_kills_child_groups_and_reaps() {
+    let dir = fixture();
+    script(
+        dir.path(),
+        "kubectl",
+        "#!/bin/sh\nDIR=$(dirname \"$0\")\nsleep 60 &\necho \"$$ $!\" >> \"$DIR/pids\"\nwait\n",
+    );
+    let mut server = start(dir.path(), &[]);
+    let port = server.port;
+    let request = std::thread::spawn(move || http(port, "/api/snapshot"));
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while !dir.path().join("pids").exists() && Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    assert!(dir.path().join("pids").exists());
+    let pids = fs::read_to_string(dir.path().join("pids")).unwrap();
+    Command::new("kill")
+        .args(["-TERM", &server.child.id().to_string()])
+        .status()
+        .unwrap();
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while server.child.try_wait().unwrap().is_none() && Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    assert!(
+        server.child.try_wait().unwrap().is_some(),
+        "shutdown must be bounded"
+    );
+    let _ = request.join();
+    for pid in pids.split_whitespace() {
+        let status = fs::read_to_string(format!("/proc/{pid}/stat")).unwrap_or_default();
+        assert!(
+            status.is_empty() || status.split_whitespace().nth(2) == Some("Z"),
+            "child still running: {pid}: {status}"
+        );
+    }
+}
+
+#[test]
+fn incomplete_http_headers_expire() {
+    let dir = fixture();
+    let server = start(dir.path(), &[]);
+    let mut stream = TcpStream::connect(("127.0.0.1", server.port)).unwrap();
+    stream
+        .set_read_timeout(Some(Duration::from_secs(5)))
+        .unwrap();
+    stream.write_all(b"GET / HTTP/1.1\r\nHost:").unwrap();
+    let mut bytes = [0; 256];
+    assert!(
+        stream.read(&mut bytes).is_ok(),
+        "incomplete headers must time out server-side"
+    );
+}
+
+#[test]
+fn collector_output_is_bounded() {
+    let dir = fixture();
+    script(
+        dir.path(),
+        "kubectl",
+        "#!/bin/sh\nhead -c 4194305 /dev/zero\n",
+    );
+    let server = start(dir.path(), &["--timeout", "0.5"]);
+    let value = snapshot(server.port);
+    assert!(
+        value["collectors"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|c| c["error"].as_str().unwrap_or_default().contains("limit"))
+    );
+    assert!(!value.to_string().contains("opaque-private-value"));
+}
+
+#[test]
+fn successful_collectors_clean_up_background_descendants() {
+    let dir = fixture();
+    script(
+        dir.path(),
+        "kubectl",
+        "#!/bin/sh\nDIR=$(dirname \"$0\")\nsleep 60 </dev/null >/dev/null 2>&1 &\necho $! >> \"$DIR/background-pids\"\nprintf '{\"items\":[]}'\n",
+    );
+    let server = start(dir.path(), &[]);
+    let _ = snapshot(server.port);
+    let pids = fs::read_to_string(dir.path().join("background-pids")).unwrap();
+    for pid in pids.split_whitespace() {
+        let status = fs::read_to_string(format!("/proc/{pid}/stat")).unwrap_or_default();
+        assert!(
+            status.is_empty() || status.split_whitespace().nth(2) == Some("Z"),
+            "successful collector left descendant alive: {pid}"
+        );
+    }
+}
+
+#[test]
+fn resource_budgets_are_visible_and_bound_derived_snapshot() {
+    let dir = fixture();
+    let pod: Value =
+        serde_json::from_str::<Value>(&fs::read_to_string(dir.path().join("pods.json")).unwrap())
+            .unwrap()["items"][0]
+            .clone();
+    fs::write(
+        dir.path().join("pods.json"),
+        serde_json::json!({"items": vec![pod; 1000]}).to_string(),
+    )
+    .unwrap();
+    let server = start(dir.path(), &[]);
+    let value = snapshot(server.port);
+    assert!(value["pods"].as_array().unwrap().len() <= 500);
+    assert!(value["issues"].as_array().unwrap().iter().any(|i| {
+        i["title"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("truncated")
+    }));
+}
+
+#[test]
+fn timeout_kills_and_reaps_collector_group_without_stderr_leak() {
+    let dir = fixture();
+    script(
+        dir.path(),
+        "kubectl",
+        "#!/bin/sh\nDIR=$(dirname \"$0\")\nsleep 60 &\necho \"$$ $!\" > \"$DIR/timeout-pids\"\necho sensitive-metadata-key-value >&2\nwait\n",
+    );
+    let server = start(dir.path(), &["--timeout", "0.1"]);
+    let (status, body) = http(server.port, "/api/logs?pod=pod-0");
+    assert_eq!(status, 200);
+    assert!(body.contains("timed out"));
+    assert!(!body.contains("sensitive-metadata"));
+    let pids = fs::read_to_string(dir.path().join("timeout-pids")).unwrap();
+    for (index, pid) in pids.split_whitespace().enumerate() {
+        let stat = fs::read_to_string(format!("/proc/{pid}/stat")).unwrap_or_default();
+        if index == 0 {
+            assert!(stat.is_empty(), "direct child not reaped");
+        } else {
+            assert!(stat.is_empty() || stat.split_whitespace().nth(2) == Some("Z"));
+        }
+    }
+}
+
+#[test]
+fn all_api_routes_enforce_session_methods_and_actual_port() {
+    let dir = fixture();
+    let server = start(dir.path(), &[]);
+    let host = format!("Host: 127.0.0.1:{}\r\n", server.port);
+    let (_, page) = raw_http(server.port, "/", &host);
+    let token = page
+        .split("name=\"db3-session\" content=\"")
+        .nth(1)
+        .unwrap()
+        .split('"')
+        .next()
+        .unwrap();
+    assert_eq!(token.len(), 64);
+    assert!(token.bytes().all(|b| b.is_ascii_hexdigit()));
+    for path in [
+        "/api/health",
+        "/api/snapshot",
+        "/api/logs?pod=pod-0",
+        "/api/manifest",
+        "/api/unknown",
+    ] {
+        assert_eq!(raw_http(server.port, path, &host).0, 401);
+        assert_eq!(
+            raw_http(
+                server.port,
+                path,
+                &format!("{host}X-DB3-Session: wrong\r\n")
+            )
+            .0,
+            401
+        );
+    }
+    let headers = format!(
+        "{host}X-DB3-Session: {token}\r\nOrigin: http://127.0.0.1:{}\r\n",
+        server.port
+    );
+    let (status, response) = raw_http(server.port, "/api/health", &headers);
+    assert_eq!(status, 200);
+    assert!(response.to_lowercase().contains("cache-control: no-store"));
+    assert!(response.to_lowercase().contains("x-frame-options: deny"));
+    assert!(
+        !response
+            .to_lowercase()
+            .contains("access-control-allow-origin")
+    );
+    assert_eq!(
+        raw_method(server.port, "POST", "/api/health", &headers).0,
+        405
+    );
+    assert_eq!(
+        raw_method(server.port, "HEAD", "/api/health", &headers).0,
+        200
+    );
+    assert_eq!(raw_http(server.port, "/", "Host: 127.0.0.1:1\r\n").0, 403);
+    let second = start(dir.path(), &[]);
+    let (_, second_page) = raw_http(
+        second.port,
+        "/",
+        &format!("Host: 127.0.0.1:{}\r\n", second.port),
+    );
+    assert!(
+        !second_page.contains(token),
+        "session must be distinct per run"
+    );
 }
 
 fn snapshot(port: u16) -> Value {
@@ -263,7 +596,7 @@ fn snapshot(port: u16) -> Value {
 #[test]
 fn serves_app_shell_and_redacted_snapshot() {
     let dir = fixture();
-    let server = start(dir.path(), &[]);
+    let server = start(dir.path(), &["--include-secret-metadata", "--helm"]);
 
     let (status, page) = http(server.port, "/");
     assert_eq!(status, 200);
@@ -315,7 +648,10 @@ fn serves_app_shell_and_redacted_snapshot() {
         value["configmaps"][0]["data"]["INFLUXDB3_LICENSE_JWT"],
         "[redacted]"
     );
-    assert_eq!(value["configmaps"][0]["data"]["INFLUXDB3_BUCKET"], "lab");
+    assert_eq!(
+        value["configmaps"][0]["data"]["INFLUXDB3_BUCKET"],
+        "[redacted]"
+    );
     assert_eq!(value["secret_values_exposed"], false);
 
     // Helm is read as its own program, not through kubectl.
@@ -498,4 +834,404 @@ fn ctrl_c_stops_the_console_and_releases_the_port() {
         closed,
         "port {port} was still accepting connections after exit"
     );
+}
+
+#[test]
+fn idle_listener_survives_socket_timeouts_and_accepts_new_requests() {
+    let dir = fixture();
+    let mut server = start(dir.path(), &[]);
+    // No request at all for more than two inherited listener I/O timeouts.
+    std::thread::sleep(Duration::from_millis(4500));
+    assert!(
+        server.child.try_wait().unwrap().is_none(),
+        "console exited while idle rather than staying alive until Ctrl+C"
+    );
+    assert_eq!(http(server.port, "/api/health").0, 200);
+}
+
+#[test]
+fn body_headers_are_rejected_before_readers_and_shutdown_is_bounded() {
+    for signal in ["-INT", "-TERM"] {
+        for header in [
+            "Content-Length: 1",
+            "Content-Length: 2048",
+            "Content-Length: 18446744073709551615",
+            "Content-Length: invalid",
+            "Content-Length: -1",
+            "Transfer-Encoding: chunked",
+        ] {
+            let dir = fixture();
+            let mut server = start(dir.path(), &[]);
+            let mut socket = TcpStream::connect(("127.0.0.1", server.port)).unwrap();
+            socket
+                .set_read_timeout(Some(Duration::from_secs(3)))
+                .unwrap();
+            write!(
+                socket,
+                "GET / HTTP/1.1\r\nHost: 127.0.0.1:{}\r\n{}\r\n\r\n{}",
+                server.port,
+                header,
+                if header == "Content-Length: 1" {
+                    ""
+                } else {
+                    "x"
+                }
+            )
+            .unwrap();
+            let mut drip = socket.try_clone().unwrap();
+            let running = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true));
+            let active = running.clone();
+            let writer = std::thread::spawn(move || {
+                while active.load(std::sync::atomic::Ordering::SeqCst) {
+                    let _ = drip.write_all(b"x");
+                    std::thread::sleep(Duration::from_millis(200));
+                }
+            });
+            let mut response = [0; 128];
+            let result = socket.read(&mut response);
+            let pid = server.child.id().to_string();
+            assert!(
+                Command::new("kill")
+                    .args([signal, &pid])
+                    .status()
+                    .unwrap()
+                    .success()
+            );
+            let deadline = Instant::now() + Duration::from_secs(4);
+            let mut exited = false;
+            while Instant::now() < deadline {
+                if server.child.try_wait().unwrap().is_some() {
+                    exited = true;
+                    break;
+                }
+                std::thread::sleep(Duration::from_millis(25));
+            }
+            running.store(false, std::sync::atomic::Ordering::SeqCst);
+            writer.join().unwrap();
+            assert!(
+                exited,
+                "shutdown blocked while client dripped: {header} {signal}"
+            );
+            let size = result.expect("immediate HTTP rejection");
+            assert!(
+                String::from_utf8_lossy(&response[..size]).starts_with("HTTP/1.1 400"),
+                "{header}: {:?}",
+                String::from_utf8_lossy(&response[..size])
+            );
+        }
+    }
+}
+
+#[test]
+fn empty_body_requests_remain_supported() {
+    let dir = fixture();
+    let server = start(dir.path(), &[]);
+    assert_eq!(
+        raw_http(
+            server.port,
+            "/",
+            &format!("Host: 127.0.0.1:{}\r\nContent-Length: 0\r\n", server.port)
+        )
+        .0,
+        200
+    );
+    assert_eq!(http(server.port, "/api/health").0, 200);
+    let host = format!("Host: 127.0.0.1:{}\r\n", server.port);
+    assert_eq!(
+        raw_http(server.port, "/", &format!("{host}Content-Length: 2048\r\n")).0,
+        400
+    );
+    assert_eq!(
+        raw_method(
+            server.port,
+            "HEAD",
+            "/",
+            &format!("{host}Content-Length: 0\r\n")
+        )
+        .0,
+        200
+    );
+}
+
+#[test]
+fn request_header_buffers_are_bounded() {
+    let dir = fixture();
+    let server = start(dir.path(), &[]);
+    for extra in [
+        format!("X-Large: {}\r\n", "x".repeat(8192)),
+        "X-A: a\r\n".repeat(65),
+        format!("X-A: {}\r\n", "x".repeat(7000)).repeat(5),
+    ] {
+        assert_eq!(
+            raw_http(
+                server.port,
+                "/",
+                &format!("Host: 127.0.0.1:{}\r\n{extra}", server.port)
+            )
+            .0,
+            400
+        );
+    }
+}
+
+#[test]
+fn helm_is_never_invoked_without_explicit_opt_in() {
+    for flags in [vec![], vec!["--include-secret-metadata"]] {
+        let dir = fixture();
+        let server = start(dir.path(), &flags);
+        let value = snapshot(server.port);
+        assert!(
+            !dir.path().join("helm-calls").exists(),
+            "default collection invoked Helm"
+        );
+        assert_eq!(value["helm_enabled"], false);
+        assert_eq!(value["helm"], serde_json::json!([]));
+    }
+    let dir = fixture();
+    let server = start(dir.path(), &["--helm"]);
+    let value = snapshot(server.port);
+    assert_eq!(value["helm_enabled"], true);
+    assert_eq!(value["helm"][0]["name"], "db3");
+    assert_eq!(value["secrets"], serde_json::json!([]));
+    assert!(dir.path().join("helm-calls").exists());
+}
+
+#[test]
+fn configuration_truncation_stays_partial_with_bounded_data() {
+    for resource in ["configmaps", "secrets"] {
+        let dir = fixture();
+        let rows: Vec<_> = (0..501).map(|i| serde_json::json!({"metadata":{"name":format!("row-{i}"),"namespace":"influxdb3"},"data":{"key":"opaque"}})).collect();
+        write_fixture(
+            dir.path(),
+            &format!("{resource}.json"),
+            &serde_json::json!({"items":rows}).to_string(),
+        );
+        let server = start(dir.path(), &["--include-secret-metadata"]);
+        let value = snapshot(server.port);
+        assert!(value[resource].as_array().unwrap().len() <= 500);
+        assert!(!value[resource].as_array().unwrap().is_empty());
+        let status = value["collectors"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|v| v["name"] == "configuration")
+            .unwrap();
+        assert_eq!(status["ok"], false, "{resource}: {status}");
+        assert!(status["error"].as_str().unwrap().contains("partial"));
+    }
+}
+
+#[test]
+fn configuration_aggregate_budgets_limit_namespaces_rows_and_bytes() {
+    for mode in ["namespaces", "rows", "bytes"] {
+        let dir = fixture();
+        let mut pods: Value =
+            serde_json::from_str(&fs::read_to_string(dir.path().join("pods.json")).unwrap())
+                .unwrap();
+        if mode == "namespaces" {
+            let pod = pods["items"][0].clone();
+            pods["items"] = serde_json::json!(
+                (0..40)
+                    .map(|i| {
+                        let mut p = pod.clone();
+                        p["metadata"]["namespace"] = serde_json::json!(format!("ns-{i:02}"));
+                        p
+                    })
+                    .collect::<Vec<_>>()
+            );
+            write_fixture(dir.path(), "pods.json", &pods.to_string());
+        } else {
+            let count = if mode == "rows" { 400 } else { 2 };
+            let data = if mode == "bytes" {
+                "x".repeat(600_000)
+            } else {
+                "opaque".to_owned()
+            };
+            let rows: Vec<_> = (0..count).map(|i| serde_json::json!({"metadata":{"name":format!("row-{i}"),"namespace":"influxdb3"},"data":{data.clone():"opaque"}})).collect();
+            for resource in ["configmaps", "secrets"] {
+                write_fixture(
+                    dir.path(),
+                    &format!("{resource}.json"),
+                    &serde_json::json!({"items":rows}).to_string(),
+                );
+            }
+        }
+        let server = start(dir.path(), &["--include-secret-metadata"]);
+        let value = snapshot(server.port);
+        let config = value["collectors"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|v| v["name"] == "configuration")
+            .unwrap();
+        assert_eq!(config["ok"], false, "{mode}: {config}");
+        assert!(config["error"].as_str().unwrap().contains("partial"));
+        assert!(
+            value["configmaps"].as_array().unwrap().len()
+                + value["secrets"].as_array().unwrap().len()
+                <= 500
+        );
+        assert!(
+            serde_json::to_vec(&value["configmaps"]).unwrap().len()
+                + serde_json::to_vec(&value["secrets"]).unwrap().len()
+                <= 1_048_580
+        );
+        let calls = fs::read_to_string(dir.path().join("kubectl-calls")).unwrap();
+        assert!(
+            calls
+                .lines()
+                .filter(|l| l.contains("get configmaps") || l.contains("get secrets"))
+                .count()
+                <= 32
+        );
+    }
+}
+
+#[test]
+fn database_roles_use_verified_pod_owners_not_component_labels() {
+    let dir = fixture();
+    let mut workloads: Value =
+        serde_json::from_str(&fs::read_to_string(dir.path().join("workloads.json")).unwrap())
+            .unwrap();
+    let mut unrelated = workloads["items"][0].clone();
+    unrelated["metadata"]["name"] = serde_json::json!("unrelated");
+    unrelated["spec"]["replicas"] = serde_json::json!(99);
+    workloads["items"]
+        .as_array_mut()
+        .unwrap()
+        .insert(0, unrelated);
+    write_fixture(dir.path(), "workloads.json", &workloads.to_string());
+    let server = start(dir.path(), &[]);
+    let value = snapshot(server.port);
+    let role = value["db3"][0]["roles"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|r| r["role"] == "ingester")
+        .unwrap();
+    assert_eq!(role["desired"], 2);
+    assert_eq!(role["workload"], "db3-ingester");
+}
+
+#[test]
+fn explicit_no_secrets_conflicts_with_helm_storage_consent() {
+    let dir = fixture();
+    let mut child = env_command(dir.path())
+        .args(["webui", "--no-secrets", "--helm"])
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let deadline = Instant::now() + Duration::from_secs(2);
+    while child.try_wait().unwrap().is_none() && Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    if child.try_wait().unwrap().is_none() {
+        child.kill().unwrap();
+        child.wait().unwrap();
+        panic!("conflicting flags unexpectedly started the server");
+    }
+    let output = child.wait_with_output().unwrap();
+    assert!(!output.status.success());
+    assert!(String::from_utf8_lossy(&output.stderr).contains("cannot be used"));
+}
+
+#[test]
+fn ambiguous_pod_owner_is_not_arbitrarily_selected() {
+    let dir = fixture();
+    let mut pods: Value =
+        serde_json::from_str(&fs::read_to_string(dir.path().join("pods.json")).unwrap()).unwrap();
+    pods["items"][0]["metadata"]["ownerReferences"]
+        .as_array_mut()
+        .unwrap()
+        .push(serde_json::json!({"kind":"StatefulSet","name":"other"}));
+    write_fixture(dir.path(), "pods.json", &pods.to_string());
+    let server = start(dir.path(), &[]);
+    let value = snapshot(server.port);
+    let role = value["db3"][0]["roles"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|r| r["role"] == "ingester")
+        .unwrap();
+    assert!(role["workload"].is_null());
+    assert!(role["desired"].is_null());
+}
+
+#[test]
+fn verified_owners_are_deduplicated_and_unknown_ancestry_stays_unmapped() {
+    for mode in ["deduplicate", "sum", "replicaset", "namespace"] {
+        let dir = fixture();
+        let mut pods: Value =
+            serde_json::from_str(&fs::read_to_string(dir.path().join("pods.json")).unwrap())
+                .unwrap();
+        let mut workloads: Value =
+            serde_json::from_str(&fs::read_to_string(dir.path().join("workloads.json")).unwrap())
+                .unwrap();
+        if mode == "replicaset" {
+            pods["items"][0]["metadata"]["ownerReferences"][0]["kind"] =
+                serde_json::json!("ReplicaSet");
+        } else if mode == "namespace" {
+            workloads["items"][0]["metadata"]["namespace"] = serde_json::json!("other");
+        } else {
+            let mut extra = pods["items"][0].clone();
+            extra["metadata"]["name"] = serde_json::json!("extra-0");
+            if mode == "sum" {
+                extra["metadata"]["ownerReferences"][0]["name"] = serde_json::json!("second-owner");
+                let mut owner = workloads["items"][0].clone();
+                owner["metadata"]["name"] = serde_json::json!("second-owner");
+                owner["spec"]["replicas"] = serde_json::json!(3);
+                workloads["items"].as_array_mut().unwrap().push(owner);
+            }
+            pods["items"].as_array_mut().unwrap().push(extra);
+        }
+        write_fixture(dir.path(), "pods.json", &pods.to_string());
+        write_fixture(dir.path(), "workloads.json", &workloads.to_string());
+        let server = start(dir.path(), &[]);
+        let value = snapshot(server.port);
+        let role = value["db3"][0]["roles"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|r| r["role"] == "ingester")
+            .unwrap();
+        match mode {
+            "deduplicate" => {
+                assert_eq!(role["desired"], 2);
+                assert_eq!(role["workload"], "db3-ingester");
+            }
+            "sum" => {
+                assert_eq!(role["desired"], 5);
+                assert!(role["workload"].is_null());
+            }
+            _ => {
+                assert!(role["desired"].is_null());
+                assert!(role["workload"].is_null());
+            }
+        }
+    }
+}
+
+#[test]
+fn configuration_byte_budget_counts_final_masked_representation() {
+    let dir = fixture();
+    let data: serde_json::Map<String, Value> = (0..22000)
+        .map(|i| (format!("k{i}"), serde_json::json!("")))
+        .collect();
+    write_fixture(dir.path(), "configmaps.json", &serde_json::json!({"items":[{"metadata":{"name":"many-keys","namespace":"influxdb3"},"data":data}]}).to_string());
+    let server = start(dir.path(), &[]);
+    let value = snapshot(server.port);
+    let bytes = serde_json::to_vec(&value["configmaps"]).unwrap().len()
+        + serde_json::to_vec(&value["secrets"]).unwrap().len();
+    assert!(
+        bytes <= 1_048_576,
+        "final configuration grew after budget check: {bytes}"
+    );
+    let config = value["collectors"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|v| v["name"] == "configuration")
+        .unwrap();
+    assert_eq!(config["ok"], false);
 }

@@ -189,7 +189,7 @@ export interface RolePodRow {
 
 export interface RoleState {
   role: string;
-  desired: number;
+  desired: number | null;
   ready: number;
   pods: RolePodRow[];
   workload: string | null;
@@ -252,6 +252,7 @@ export interface Snapshot {
     claims: ClaimRow[];
   };
   helm: HelmReleaseRow[];
+  helm_enabled?: boolean;
   configmaps: ConfigMapRow[];
   secrets: SecretRow[];
   secret_values_exposed: boolean;

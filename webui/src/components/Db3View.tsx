@@ -120,7 +120,7 @@ export function Db3View({ snapshot }: { snapshot: Snapshot }) {
         <div className="grid two">
           {clusters.map((cluster) => {
             const ready = cluster.roles.reduce((sum, role) => sum + role.ready, 0);
-            const desired = cluster.roles.reduce((sum, role) => sum + role.desired, 0);
+            const desired = cluster.roles.reduce((sum, role) => sum + (role.desired ?? 0), 0);
             return (
               <Card
                 key={cluster.key}
@@ -130,7 +130,7 @@ export function Db3View({ snapshot }: { snapshot: Snapshot }) {
                     <Badge tone="neutral">{cluster.namespace}</Badge>
                   </span>
                 }
-                subtitle={`${ready}/${desired} replicas ready · ${cluster.pod_count} pods`}
+                subtitle={`${ready}/${cluster.roles.some((role) => role.desired === null) ? "?" : desired} replicas ready · ${cluster.pod_count} pods`}
               >
                 <div className="stack">
                   <dl className="kv" style={{ gridTemplateColumns: "130px 1fr" }}>
@@ -155,7 +155,7 @@ export function Db3View({ snapshot }: { snapshot: Snapshot }) {
                       {cluster.helm_releases.length ? (
                         <span className="mono">{cluster.helm_releases.join(", ")}</span>
                       ) : (
-                        <span className="muted">not managed by Helm, or helm unavailable</span>
+                        <span className="muted">Helm association not observed (collection may be disabled)</span>
                       )}
                     </dd>
                     <dt>License</dt>
@@ -181,11 +181,11 @@ export function Db3View({ snapshot }: { snapshot: Snapshot }) {
                         <div className="row between" style={{ fontSize: 12 }}>
                           <span style={{ textTransform: "capitalize", fontWeight: 600 }}>{role.role}</span>
                           <span className="muted mono" style={{ fontSize: 11 }}>
-                            {role.ready}/{role.desired}
+                            {role.ready}/{role.desired ?? "?"}
                             {role.mode ? ` · ${role.mode}` : ""}
                           </span>
                         </div>
-                        <Meter ready={role.ready} desired={role.desired} />
+                        {role.desired === null ? <span className="muted">Owner capacity unverified</span> : <Meter ready={role.ready} desired={role.desired} />}
                         <div className="row" style={{ gap: 6 }}>
                           {role.pods.map((pod) => (
                             <span

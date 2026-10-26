@@ -12,10 +12,9 @@
 #
 #   kubectl --as=system:serviceaccount:db3-webui:db3-webui get pods -A
 #
-# Nothing here grants write access. Secret *values* are never emitted by the
-# collector: it keeps only names and key names. RBAC cannot express
-# "metadata only" for Secrets, so review that grant before using this
-# identity outside a lab.
+# No write/exec or Secret grants. Secret metadata is opt-in and requires a
+# separately reviewed scoped grant: Kubernetes has no metadata-only Secret verb.
+# Helm normal release storage may require Secret reads; do not broaden this role.
 apiVersion: v1
 kind: Namespace
 metadata:
@@ -58,12 +57,6 @@ rules:
     resources:
       - pods/log
     verbs: ["get"]
-  # Required only for Secret names and key names; values are discarded by the
-  # collector before a snapshot is assembled.
-  - apiGroups: [""]
-    resources:
-      - secrets
-    verbs: ["get", "list"]
   - apiGroups: ["apps"]
     resources:
       - statefulsets

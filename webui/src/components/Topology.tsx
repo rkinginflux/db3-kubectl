@@ -49,21 +49,28 @@ export function Topology({ snapshot }: { snapshot: Snapshot }) {
   const [selected, setSelected] = useState<string | null>(null);
 
   const layout = useMemo(() => {
-    const pods = snapshot.pods.filter((pod) => pod.component);
-    const workloads = snapshot.workloads.filter((workload) =>
-      snapshot.pods.some(
-        (pod) =>
-          pod.component &&
-          pod.namespace === workload.namespace &&
-          (pod.owner_name === workload.name || pod.component === workload.component),
-      ),
-    );
-    const services = snapshot.services.filter(
+    const LIMIT = 80; // At most 240 rendered boxes across the three columns.
+    const WORK = 20_000;
+    let comparisons = 0;
+    let partial = [snapshot.pods, snapshot.workloads, snapshot.services, snapshot.nodes].some(rows => rows.length > LIMIT);
+    const spend = (cost = 1) => {
+      comparisons += cost;
+      if (comparisons > WORK) { partial = true; return false; }
+      return true;
+    };
+    const owns = (pod: PodRow, workload: WorkloadRow) => spend() && pod.namespace === workload.namespace && pod.owner_kind === workload.kind && pod.owner_name === workload.name;
+    const selectorMatches = (pod: PodRow, service: ServiceRow) => spend(Object.keys(service.selector).length + 1) && matchesSelector(pod, service);
+    const pods = snapshot.pods.slice(0, LIMIT).filter((pod) => pod.component);
+    const workloads = snapshot.workloads.slice(0, LIMIT).filter((workload) => pods.some(pod => owns(pod, workload)));
+    // ReplicaSet -> Deployment ancestry is not collected. Leave those pods
+    // unmapped rather than invent ownership from a shared component label.
+    if (pods.some(pod => !workloads.some(workload => owns(pod, workload)))) partial = true;
+    const services = snapshot.services.slice(0, LIMIT).filter(
       (service) => service.component || service.selector["app.kubernetes.io/component"],
     );
 
     const nodesUsed = new Set(pods.map((pod) => pod.node).filter(Boolean) as string[]);
-    const nodes = snapshot.nodes.filter((node) => nodesUsed.has(node.name));
+    const nodes = snapshot.nodes.slice(0, LIMIT).filter((node) => nodesUsed.has(node.name));
 
     // ---------------------------------------------------------------- nodes
     const nodeBoxes: Box[] = nodes.map((node, index) => ({
@@ -80,7 +87,7 @@ export function Topology({ snapshot }: { snapshot: Snapshot }) {
 
     // ------------------------------------------------------------ workloads
     const desiredWorkloadY = workloads.map((workload) => {
-      const related = pods.filter((pod) => pod.namespace === workload.namespace && pod.component === workload.component);
+      const related = pods.filter((pod) => owns(pod, workload));
       const values = related.map((pod) => nodeY.get(pod.node ?? "") ?? TOP);
       if (values.length === 0) return TOP;
       const mean = values.reduce((sum, value) => sum + value, 0) / values.length;
@@ -103,9 +110,7 @@ export function Topology({ snapshot }: { snapshot: Snapshot }) {
       const matches = workloads.filter((workload) =>
         pods.some(
           (pod) =>
-            pod.namespace === workload.namespace &&
-            pod.component === workload.component &&
-            matchesSelector(pod, service),
+            owns(pod, workload) && selectorMatches(pod, service),
         ),
       );
       const boxes = workBoxes.filter((box) =>
@@ -131,11 +136,15 @@ export function Topology({ snapshot }: { snapshot: Snapshot }) {
 
     // ---------------------------------------------------------------- edges
     const edges: Edge[] = [];
+    const addEdge = (edge: Edge) => {
+      if (edges.length >= 500) { partial = true; return; }
+      edges.push(edge);
+    };
     for (const workload of workloads) {
       const box = workBoxes.find((item) => item.id === `work:${workload.namespace}/${workload.name}`);
       if (!box) continue;
       const relatedPods = pods.filter(
-        (pod) => pod.namespace === workload.namespace && pod.component === workload.component,
+        (pod) => owns(pod, workload),
       );
       const seen = new Set<string>();
       for (const pod of relatedPods) {
@@ -143,7 +152,7 @@ export function Topology({ snapshot }: { snapshot: Snapshot }) {
         seen.add(pod.node);
         const node = nodeBoxes.find((item) => item.id === `node:${pod.node}`);
         if (!node) continue;
-        edges.push({
+        addEdge({
           id: `e:${node.id}->${box.id}`,
           from: node,
           to: box,
@@ -158,10 +167,10 @@ export function Topology({ snapshot }: { snapshot: Snapshot }) {
         const workBox = workBoxes.find((item) => item.id === `work:${workload.namespace}/${workload.name}`);
         if (!workBox) continue;
         const related = pods.filter(
-          (pod) => pod.namespace === workload.namespace && pod.component === workload.component && matchesSelector(pod, service),
+          (pod) => owns(pod, workload) && selectorMatches(pod, service),
         );
         if (related.length === 0) continue;
-        edges.push({
+        addEdge({
           id: `e:${workBox.id}->${box.id}`,
           from: workBox,
           to: box,
@@ -172,6 +181,7 @@ export function Topology({ snapshot }: { snapshot: Snapshot }) {
 
     const lowest = Math.max(0, ...[...nodeBoxes, ...workBoxes, ...serviceBoxes].map((box) => box.y + box.height));
     return {
+      partial,
       nodeBoxes,
       workBoxes,
       serviceBoxes,
@@ -217,6 +227,7 @@ export function Topology({ snapshot }: { snapshot: Snapshot }) {
         )
       }
     >
+      {layout.partial && <p role="status" className="muted">Partial topology: node, edge or selector-work limits reached, or pod ownership is unmapped. Only observed owner references are linked; missing ancestry is not inferred.</p>}
       {layout.workBoxes.length === 0 ? (
         <Empty glyph="◇">No database workloads matched the collected namespaces.</Empty>
       ) : (

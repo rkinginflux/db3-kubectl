@@ -38,7 +38,7 @@ const TITLES: Record<ViewKey, { title: string; subtitle: string }> = {
   db3: { title: "InfluxDB 3", subtitle: "Clusters, roles, pods and licensing" },
   kubernetes: { title: "Kubernetes", subtitle: "Nodes, workloads, services, storage and policies" },
   helm: { title: "Helm", subtitle: "Releases, chart pins and revision state" },
-  config: { title: "Config & secrets", subtitle: "ConfigMaps, secret key names, and container environment" },
+  config: { title: "Config & secrets", subtitle: "ConfigMaps, opt-in Secret metadata, and masked container environment" },
   events: { title: "Events", subtitle: "Recent warnings and lifecycle messages" },
   logs: { title: "Logs", subtitle: "Bounded on-demand pod log tails" },
 };
@@ -236,7 +236,8 @@ export function App() {
         <main className="content content-wide">
           {error && (
             <div className="error-banner">
-              Could not read a snapshot: {error}. Check that kubectl can reach the cluster, then refresh.
+              {snapshot ? "Disconnected — cached observations are stale. " : "Could not read the local console. "}
+              {error}. Check that the webui command is still running and kubectl can reach the cluster, then refresh.
             </div>
           )}
 
@@ -261,6 +262,10 @@ export function App() {
           {snapshot && view === "logs" && <LogsView snapshot={snapshot} />}
 
           {!loading && !snapshot && !error && <div className="empty">No snapshot available.</div>}
+          <footer className="muted" style={{ fontSize: 11, lineHeight: 1.6 }}>
+            <p>InfluxDB® is a registered trademark of InfluxData Inc.</p>
+            <p>Independent community tool; not endorsed by or affiliated with InfluxData.</p>
+          </footer>
         </main>
       </div>
     </div>
