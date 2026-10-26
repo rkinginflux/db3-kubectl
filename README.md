@@ -231,4 +231,8 @@ Live-cluster collection is not part of the automated tests. The collector does n
 
 This project is released under the [MIT License](LICENSE.md). The license covers this project's source code; it does not grant rights to any third-party trademark, and it does not replace the attribution and permission notes in [TRADEMARKS.md](TRADEMARKS.md). Third-party components embedded in the compiled binary are attributed in [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).
 
+## License
+
+This project is released under the [MIT License](LICENSE.md). The license covers this project's source code; it does not grant rights to any third-party trademark, and it does not replace the attribution and permission notes in [TRADEMARKS.md](TRADEMARKS.md). Third-party components embedded in the compiled binary are attributed in [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).
+
 [^trademark]: InfluxDB® is a trademark registered by InfluxData, which is not affiliated with, and does not endorse, this project.
