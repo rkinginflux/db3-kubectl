@@ -203,9 +203,13 @@ fn env_command(dir: &Path) -> Command {
 }
 
 fn start_with(dir: &Path, extra: &[&str], envs: &[(&str, &str)]) -> Server {
+    start_on(dir, "127.0.0.1", extra, envs)
+}
+
+fn start_on(dir: &Path, address: &str, extra: &[&str], envs: &[(&str, &str)]) -> Server {
     let mut command = env_command(dir);
     command
-        .args(["webui", "--port", "0", "--address", "127.0.0.1"])
+        .args(["webui", "--port", "0", "--address", address])
         .args(extra)
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
@@ -382,11 +386,115 @@ fn default_never_collects_secrets_and_hides_opaque_config() {
         "[redacted]"
     );
     assert_eq!(value["db3"][0]["object_store"], "s3");
-    let output = env_command(dir.path())
-        .args(["webui", "--address", "0.0.0.0", "--port", "0"])
-        .output()
+}
+
+#[test]
+fn non_loopback_bind_is_accepted_and_serves_a_remote_host() {
+    let dir = fixture();
+    // 0.0.0.0 is an unspecified address, previously rejected outright.
+    let server = start_on(dir.path(), "0.0.0.0", &[], &[]);
+    // A client on another machine presents its own address in Host, which cannot
+    // equal the bind address, so the pin must not apply here.
+    let host = format!("Host: 198.51.100.7:{}\r\n", server.port);
+    let (status, page) = raw_http(server.port, "/", &host);
+    assert_eq!(status, 200, "{page}");
+    assert!(page.contains("Environment Console"));
+
+    // The API works over the same remote-style authority.
+    let session = page
+        .split("name=\"db3-session\" content=\"")
+        .nth(1)
+        .expect("session bootstrap")
+        .split('"')
+        .next()
         .unwrap();
-    assert!(!output.status.success());
+    let (status, body) = raw_http(
+        server.port,
+        "/api/snapshot",
+        &format!("{host}X-DB3-Session: {session}\r\n"),
+    );
+    assert_eq!(status, 200, "{body}");
+    assert!(body.contains("\"nodes\""), "{body}");
+
+    // The listener must actually be wildcard. Binding was previously routed
+    // through `display_host`, which maps 0.0.0.0 to "localhost" and silently
+    // narrowed the socket to loopback while the banner claimed otherwise.
+    // Connecting over a non-loopback local address proves the bind is real.
+    if let Some(ip) = primary_ipv4() {
+        std::net::TcpStream::connect((ip, server.port))
+            .unwrap_or_else(|error| panic!("0.0.0.0 must accept on {ip}: {error}"));
+    }
+}
+
+/// The host's primary non-loopback IPv4 address, discovered without sending a
+/// packet. Returns None on a loopback-only host, where the wildcard check cannot
+/// be made.
+fn primary_ipv4() -> Option<std::net::Ipv4Addr> {
+    let socket = std::net::UdpSocket::bind("0.0.0.0:0").ok()?;
+    socket.connect("192.0.2.1:9").ok()?;
+    match socket.local_addr().ok()? {
+        std::net::SocketAddr::V4(addr) if !addr.ip().is_loopback() => Some(*addr.ip()),
+        _ => None,
+    }
+}
+
+#[test]
+fn non_loopback_bind_still_rejects_cross_origin_requests() {
+    let dir = fixture();
+    let server = start_on(dir.path(), "0.0.0.0", &[], &[]);
+    let host = format!("Host: 198.51.100.7:{}", server.port);
+    // Same-origin, matching the Host the client actually used.
+    assert_eq!(
+        raw_http(
+            server.port,
+            "/",
+            &format!("{host}\r\nOrigin: http://198.51.100.7:{}\r\n", server.port)
+        )
+        .0,
+        200
+    );
+    // A foreign origin is still refused, so the bind cannot be driven cross-site.
+    assert_eq!(
+        raw_http(
+            server.port,
+            "/",
+            &format!("{host}\r\nOrigin: https://attacker.example\r\n")
+        )
+        .0,
+        403
+    );
+}
+
+#[test]
+fn non_loopback_bind_warns_on_startup() {
+    let dir = fixture();
+    let mut child = env_command(dir.path())
+        .args(["webui", "--address", "0.0.0.0", "--port", "0"])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let stdout = child.stdout.take().expect("piped stdout");
+    let mut reader = BufReader::new(stdout);
+    let mut seen = String::new();
+    let deadline = Instant::now() + Duration::from_secs(15);
+    while Instant::now() < deadline {
+        let mut line = String::new();
+        if reader.read_line(&mut line).unwrap_or(0) == 0 {
+            break;
+        }
+        let warned = line.contains("non-loopback");
+        seen.push_str(&line);
+        if warned {
+            break;
+        }
+    }
+    let _ = child.kill();
+    let _ = child.wait();
+    assert!(
+        seen.contains("non-loopback") && seen.contains("anyone who can reach port"),
+        "expected a non-loopback warning, got: {seen}"
+    );
 }
 
 #[test]

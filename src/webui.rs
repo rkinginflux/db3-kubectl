@@ -1,4 +1,4 @@
-//! `kubectl db3 webui` — a temporary, loopback-only console for the
+//! `kubectl db3 webui` — a temporary console for the
 //! Kubernetes environment that hosts InfluxDB 3.
 //!
 //! The server lives exactly as long as this process: Ctrl+C stops it and the
@@ -68,6 +68,11 @@ struct State {
     token: String,
     session: String,
     authority: String,
+    /// True when bound to loopback, where the Host header is pinned to the
+    /// address we chose. A non-loopback bind cannot know the name or address a
+    /// client will use, so the Host header is accepted as-is and the Origin is
+    /// still required to be same-origin with it.
+    pin_authority: bool,
     nonce: String,
     query_enabled: bool,
     stop: Arc<AtomicBool>,
@@ -86,14 +91,11 @@ pub fn run(args: Webui) -> Result<(), Box<dyn std::error::Error>> {
         return Err("--refresh must be 3600 seconds or less".into());
     }
 
-    if !is_loopback(&args.address) {
-        return Err("--address must be a loopback IP address or localhost".into());
-    }
     let token = std::env::var("INFLUXDB3_TOKEN").unwrap_or_default();
     if args.query && token.trim().is_empty() {
         return Err("--query requires INFLUXDB3_TOKEN in the environment".into());
     }
-    let bind = format!("{}:{}", display_host(&args.address), args.port);
+    let bind = format!("{}:{}", bind_host(&args.address), args.port);
     let listener = TcpListener::bind(&bind).map_err(|error| {
         format!(
             "could not start the console on {bind}: {error}. \
@@ -174,6 +176,7 @@ pub fn run(args: Webui) -> Result<(), Box<dyn std::error::Error>> {
         session: random_hex()?,
         nonce: random_hex()?,
         authority: format!("{host}:{actual}"),
+        pin_authority: is_loopback(&args.address),
     });
 
     let mut workers = Vec::new();
@@ -205,6 +208,17 @@ pub fn run(args: Webui) -> Result<(), Box<dyn std::error::Error>> {
     drop(server);
     println!("db3: console stopped; port {actual} released.");
     Ok(())
+}
+
+/// The address to bind. Brackets IPv6 literals so they can be joined with a port;
+/// everything else is used verbatim, which matters because `0.0.0.0` and `::`
+/// must not be normalised to `localhost` or the listener silently narrows to
+/// loopback while the banner claims otherwise.
+fn bind_host(address: &str) -> String {
+    match address {
+        value if value.contains(':') && !value.starts_with('[') => format!("[{value}]"),
+        value => value.to_owned(),
+    }
 }
 
 fn display_host(address: &str) -> String {
@@ -252,10 +266,25 @@ fn handle(state: &State, request: Request) {
             .map(|h| h.value.as_str())
             .collect::<Vec<_>>()
     };
-    if values("Host") != [state.authority.as_str()] || {
-        let origins = values("Origin");
-        !origins.is_empty() && origins != [format!("http://{}", state.authority).as_str()]
-    } {
+    // Exactly one Host header is required. When bound to loopback it must be the
+    // authority we chose, which blocks DNS-rebinding; a non-loopback bind cannot
+    // predict the name or address a client used, so it is accepted and the Origin
+    // is still required to match it.
+    let hosts = values("Host");
+    let host = match hosts.as_slice() {
+        [host] if !host.is_empty() && (!state.pin_authority || *host == state.authority) => *host,
+        _ => {
+            return respond(
+                request,
+                api(
+                    json!({"error":"local same-origin authority required"}).to_string(),
+                    403,
+                ),
+            );
+        }
+    };
+    let origins = values("Origin");
+    if !origins.is_empty() && origins != [format!("http://{host}").as_str()] {
         return respond(
             request,
             api(
