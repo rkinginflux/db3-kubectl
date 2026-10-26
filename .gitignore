@@ -5,3 +5,5 @@ support-bundle/
 /target/
 /kubectl-db3
 /kubectl-db3.new
+# The built console is committed (src/webui.rs embeds it); dependencies are not.
+/webui/node_modules/

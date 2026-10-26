@@ -13,6 +13,9 @@ use std::{
     time::{Duration, Instant},
 };
 
+mod collect;
+mod webui;
+
 const REMOTE: &str = "IFS= read -r token\nif [ -n \"$token\" ]; then\n    exec influxdb3 \"$@\" --token \"$token\"\nfi\nexec influxdb3 \"$@\"\n";
 const COMMANDS: &[(&str, &[&str])] = &[
     ("nodes", &["show", "nodes", "--format", "json"]),
@@ -36,6 +39,8 @@ struct Cli {
 enum Commands {
     /// Collect nodes, license info, and databases as JSON
     Support(Support),
+    /// Serve a temporary local web console for the Kubernetes environment
+    Webui(webui::Webui),
 }
 #[derive(Args, Default)]
 struct Common {
@@ -64,7 +69,7 @@ enum SupportCommand {
     /// Collect logs from all pods matching a role label
     Logs(Logs),
 }
-const ROLES: [&str; 4] = ["querier", "processor", "ingester", "compactor"];
+pub(crate) const ROLES: [&str; 4] = ["querier", "processor", "ingester", "compactor"];
 #[derive(Args)]
 struct Logs {
     #[arg(default_value = "all", value_parser = ["all", "querier", "processor", "ingester", "compactor"])]
@@ -100,7 +105,16 @@ fn usage(message: &str) -> ! {
 }
 fn main() {
     let cli = Cli::parse();
-    let Commands::Support(mut args) = cli.command;
+    let mut args = match cli.command {
+        Commands::Webui(args) => {
+            if let Err(error) = webui::run(args) {
+                eprintln!("db3: {error}");
+                std::process::exit(1);
+            }
+            return;
+        }
+        Commands::Support(args) => args,
+    };
     let logs = match args.command.take() {
         Some(SupportCommand::Logs(mut logs)) => {
             args.common.override_with(std::mem::take(&mut logs.common));
@@ -157,7 +171,7 @@ fn save(path: &Path, text: &str) -> io::Result<()> {
         .open(path)?;
     file.write_all(text.as_bytes())
 }
-fn redact(text: &str, token: &str) -> String {
+pub(crate) fn redact(text: &str, token: &str) -> String {
     if token.is_empty() {
         return text.to_owned();
     }
@@ -195,11 +209,11 @@ fn prefix(common: &Common) -> Vec<String> {
     }
     args
 }
-struct Captured {
-    stdout: String,
-    stderr: String,
-    returncode: Option<i32>,
-    error: Option<String>,
+pub(crate) struct Captured {
+    pub(crate) stdout: String,
+    pub(crate) stderr: String,
+    pub(crate) returncode: Option<i32>,
+    pub(crate) error: Option<String>,
 }
 fn decoded(file: &mut fs::File) -> io::Result<String> {
     file.seek(SeekFrom::Start(0))?;
@@ -210,7 +224,12 @@ fn decoded(file: &mut fs::File) -> io::Result<String> {
         .replace('\r', "\n"))
 }
 /// Private file-backed captures avoid pipe deadlocks and preserve partial timeout output.
-fn capture(args: &[String], token: Option<&str>, timeout: f64) -> io::Result<Captured> {
+pub(crate) fn capture(
+    program: &str,
+    args: &[String],
+    token: Option<&str>,
+    timeout: f64,
+) -> io::Result<Captured> {
     let mut stdout = tempfile::tempfile()?;
     let mut stderr = tempfile::tempfile()?;
     // An anonymous private input file avoids a pipe write blocking before the
@@ -226,7 +245,7 @@ fn capture(args: &[String], token: Option<&str>, timeout: f64) -> io::Result<Cap
         Stdio::null()
     };
     let started = Instant::now();
-    let mut command = Command::new("kubectl");
+    let mut command = Command::new(program);
     command
         .args(args)
         .stdout(stdout.try_clone()?)
@@ -239,7 +258,9 @@ fn capture(args: &[String], token: Option<&str>, timeout: f64) -> io::Result<Cap
                 stdout: String::new(),
                 stderr: String::new(),
                 returncode: None,
-                error: Some("could not execute kubectl; check installation and PATH".to_owned()),
+                error: Some(format!(
+                    "could not execute {program}; check installation and PATH"
+                )),
             });
         }
     };
@@ -329,7 +350,7 @@ fn collect_logs(
         .unwrap_or(&default_selector);
     let mut argv = prefix(common);
     argv.extend(["get", "pods", "-l", selector, "-o", "json"].map(str::to_owned));
-    let mut discovery = capture(&argv, None, timeout)?;
+    let mut discovery = capture("kubectl", &argv, None, timeout)?;
     save(
         &output.join("discovery.stderr.txt"),
         &redact(&discovery.stderr, token),
@@ -365,7 +386,7 @@ fn collect_logs(
             .map(str::to_owned),
         );
         argv.push(format!("--tail={}", logs.tail));
-        let captured = capture(&argv, None, timeout)?;
+        let captured = capture("kubectl", &argv, None, timeout)?;
         let stdout = format!("{name}.log");
         let stderr = format!("{name}.stderr.txt");
         save(&output.join(&stdout), &redact(&captured.stdout, token))?;
@@ -415,7 +436,7 @@ fn collect_json(
             .chain(command.iter().copied())
             .map(str::to_owned)
             .collect();
-        let mut captured = capture(&argv, Some(token), timeout)?;
+        let mut captured = capture("kubectl", &argv, Some(token), timeout)?;
         if captured.error.is_none() && serde_json::from_str::<Value>(&captured.stdout).is_err() {
             captured.error = Some("command returned invalid JSON".to_owned());
         }
