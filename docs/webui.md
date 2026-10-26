@@ -35,7 +35,7 @@ listening socket closes with the process, so nothing keeps serving.
 | Flag | Default | Meaning |
 | --- | --- | --- |
 | `--port` | `9191` | TCP port. `0` lets the OS choose; the resolved port is printed. |
-| `--address` | `127.0.0.1` | Bind address. Only loopback IPs or `localhost`; remote and unspecified addresses are rejected. |
+| `--address` | `127.0.0.1` | Bind address. A non-loopback or unspecified address is accepted and prints a warning, because anyone who can reach the port can read the snapshot. |
 | `-n, --namespace` | all | Restrict collection to one namespace. |
 | `--context` | current | kubeconfig context to read. |
 | `--refresh` | `10` | Seconds a snapshot stays cached before a rebuild. |
@@ -304,8 +304,9 @@ contain a recognised database pod).
 - The console reflects what RBAC allows. A denied collector is reported, not
   retried with broader permissions.
 - Session/authority checks protect against remote web origins, not hostile
-  local processes or malicious browser extensions. Non-loopback binds are
-  rejected rather than supported as an anonymous remote service.
+  local processes or malicious browser extensions. A non-loopback bind is not
+  an anonymous remote service: it warns on startup and exposes the snapshot to
+  anyone who can reach the port, so keep it behind a trusted network boundary.
 - Resource arrays are capped at 500 entries and service matching at 50,000
   comparisons with visible partial/truncation findings. The browser topology
   caps each input column at 80, edges at 500, and relationship/selector work at
