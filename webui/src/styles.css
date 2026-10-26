@@ -24,7 +24,6 @@
   --info: #60a5fa;
   --info-soft: rgba(96, 165, 250, 0.12);
   --shadow: 0 18px 40px rgba(2, 6, 16, 0.55);
-  --grid-line: rgba(148, 163, 184, 0.12);
   --font: "Inter", "SF Pro Text", "Segoe UI", system-ui, -apple-system, sans-serif;
   --mono: "JetBrains Mono", "SFMono-Regular", ui-monospace, "Cascadia Code", Menlo, monospace;
 }
@@ -55,7 +54,6 @@
   --info: #1d4ed8;
   --info-soft: rgba(29, 78, 216, 0.09);
   --shadow: 0 14px 34px rgba(15, 23, 42, 0.08);
-  --grid-line: rgba(15, 23, 42, 0.08);
 }
 
 * { box-sizing: border-box; }
@@ -313,29 +311,22 @@ table.data td.mono, .mono-cell { font-family: var(--mono); font-size: 11.5px; }
 .issue .detail { font-size: 11.5px; color: var(--muted); }
 
 /* ---------------------------------------------------------------- topology */
-.topo-wrap {
-  position: relative; overflow: auto; padding: 8px 4px 4px;
-  border-radius: 10px;
-  background-image: linear-gradient(var(--grid-line) 1px, transparent 1px),
-    linear-gradient(90deg, var(--grid-line) 1px, transparent 1px);
-  background-size: 28px 28px;
+.topo-layout { display: grid; grid-template-columns: 300px minmax(0, 1fr); gap: 18px; padding: 4px 2px 2px; }
+.topo-side {
+  display: grid; gap: 8px; align-content: start; min-width: 0;
+  border-right: 1px solid var(--border); padding: 0 18px 0 0;
 }
-.topo-wrap svg { display: block; min-width: 900px; }
-.topo-legend { display: flex; gap: 16px; flex-wrap: wrap; font-size: 11.5px; color: var(--muted); padding: 10px 2px 0; }
-.topo-legend span { display: inline-flex; align-items: center; gap: 6px; }
-.topo-col-title { font-size: 11px; fill: var(--muted); letter-spacing: 0.08em; text-transform: uppercase; font-weight: 600; }
-.topo-node rect { stroke-width: 1; }
-.topo-node rect.tone-ok { stroke: color-mix(in srgb, var(--ok) 42%, var(--border)); }
-.topo-node rect.tone-warn { stroke: color-mix(in srgb, var(--warn) 46%, var(--border)); }
-.topo-node rect.tone-danger { stroke: color-mix(in srgb, var(--danger) 52%, var(--border)); }
-.topo-node rect.tone-neutral { stroke: var(--border); }
-.topo-node rect[stroke="var(--accent)"] { stroke: var(--accent); }
-.topo-node text { font-family: var(--font); }
-.topo-node .name { font-size: 12px; font-weight: 600; fill: var(--text); }
-.topo-node .sub { font-size: 10.5px; fill: var(--muted); }
-.topo-edge { stroke: var(--border-strong); fill: none; stroke-width: 1.2; }
-.topo-edge.ok { stroke: color-mix(in srgb, var(--ok) 60%, transparent); }
-.topo-edge.danger { stroke: color-mix(in srgb, var(--danger) 65%, transparent); stroke-dasharray: 4 3; }
+.topo-label { font-size: 10.5px; text-transform: uppercase; letter-spacing: 0.08em; color: var(--muted); font-weight: 650; }
+.topo-select { width: 100%; font-family: var(--mono); font-size: 12px; }
+.topo-facts {
+  display: grid; gap: 5px; margin-top: 2px; padding-top: 9px;
+  border-top: 1px solid var(--border);
+}
+.topo-fact { display: grid; grid-template-columns: 76px minmax(0, 1fr); gap: 8px; align-items: baseline; font-size: 11.5px; }
+.topo-fact-label { color: var(--muted); }
+.topo-fact-value { color: var(--text-soft); overflow-wrap: anywhere; }
+.topo-main { min-width: 0; display: grid; align-content: start; }
+.topo-summary { display: grid; gap: 2px; padding: 0 12px 10px; font-size: 12px; }
 
 /* ---------------------------------------------------------------- role bars */
 .role-card { border: 1px solid var(--border); border-radius: 10px; padding: 11px 12px; background: var(--panel); display: grid; gap: 8px; }
@@ -406,6 +397,9 @@ table.cfg td:last-child { color: var(--text-soft); word-break: break-all; }
 @media (max-width: 980px) {
   .kv { grid-template-columns: 1fr; gap: 3px; }
   .kv dd { margin-bottom: 10px; overflow-wrap: anywhere; }
+  .topo-layout { grid-template-columns: minmax(0, 1fr); gap: 12px; }
+  .topo-side { border-right: none; border-bottom: 1px solid var(--border); padding: 0 0 12px; }
+  .topo-facts { grid-template-columns: repeat(auto-fit, minmax(210px, 1fr)); gap: 4px 18px; }
   .sidebar { position: fixed; z-index: 40; transform: translateX(-100%); transition: transform 160ms ease; }
   .sidebar.open { transform: none; box-shadow: var(--shadow); }
   .shell { display: block; }

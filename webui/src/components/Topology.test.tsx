@@ -1,107 +1,125 @@
 import { expect, test } from "vitest";
-import { render, screen } from "@testing-library/react";
+import { fireEvent, render, screen } from "@testing-library/react";
 import { Topology } from "./Topology";
-import type { NodeRow, PodRow, Snapshot, WorkloadRow, ServiceRow } from "../types";
+import type { NodeRow, PodRow, Snapshot } from "../types";
 
-const pod = (n: number): PodRow => ({ namespace: "db3", name: `pod-${n}`, owner_kind: "StatefulSet", owner_name: `db-${n}`, component: "ingester", cluster_id: `cluster-${n}`, node: null, ready: true, labels: { app: "db3" }, phase: "Running", restarts: 0, start_time: null, age: "1m", inferred_component: false, images: [], containers: [], mode: "ingest" });
-const work = (n: number): WorkloadRow => ({ namespace: "db3", name: `db-${n}`, kind: "StatefulSet", component: "ingester", cluster_id: `cluster-${n}`, desired: 1, ready: 1, updated: 1, images: [], age: "1m" });
-const service = (n: number): ServiceRow => ({ namespace: "db3", name: `svc-${n}`, type: "ClusterIP", cluster_ip: "10.0.0.1", external_ips: [], ports: [], selector: { app: "db3" }, endpoints: [], component: "ingester", cluster_id: null });
-const node = (name: string): NodeRow => ({ name, ready: true, roles: ["control-plane"], version: "v1.34.1", os_image: "Ubuntu", kernel: "6.8", cpu_capacity: "8", mem_capacity_bytes: 1, cpu_allocatable: "8", mem_allocatable_bytes: 1, pods_capacity: 110, pods_used: 1, zone: "", internal_ip: "10.0.0.2", age: "1d", taints: [] });
-const snapshot = (count: number) => ({ pods: Array.from({ length: count }, (_, n) => pod(n)), workloads: Array.from({ length: count }, (_, n) => work(n)), services: Array.from({ length: count }, (_, n) => service(n)), nodes: [] } as unknown as Snapshot);
-
-test("same component is not evidence of pod ownership", () => {
-  const data = snapshot(2);
-  data.pods = [pod(0)];
-  render(<Topology snapshot={data} />);
-  expect(screen.queryByRole("button", { name: /db-1,/ })).not.toBeInTheDocument();
-  expect(screen.getByRole("button", { name: /db-0,/ })).toBeInTheDocument();
+const node = (name: string, overrides: Partial<NodeRow> = {}): NodeRow => ({
+  name,
+  ready: true,
+  roles: ["control-plane"],
+  version: "v1.34.1",
+  os_image: "Ubuntu 24.04",
+  kernel: "6.8",
+  cpu_capacity: "8",
+  mem_capacity_bytes: 16 * 1024 ** 3,
+  cpu_allocatable: "7800m",
+  mem_allocatable_bytes: 15 * 1024 ** 3,
+  pods_capacity: 110,
+  pods_used: 1,
+  zone: "us-east-1a",
+  internal_ip: "10.0.0.2",
+  age: "1d",
+  taints: [],
+  ...overrides,
 });
 
-test("every collected node is listed, including one running no database pod", () => {
-  const data = snapshot(1);
-  data.pods = [{ ...pod(0), node: "node-a" }];
-  data.workloads = [work(0)];
-  data.services = [];
-  data.nodes = [node("node-a"), node("node-b")];
-  render(<Topology snapshot={data} />);
-  // node-b hosts nothing this view tracks, but it is a cluster member, and the
-  // column is titled Nodes. It used to be dropped because the list was derived
-  // from the capped pod set.
-  expect(screen.getByRole("button", { name: /^node-a,/ })).toBeInTheDocument();
-  expect(screen.getByRole("button", { name: /^node-b,/ })).toBeInTheDocument();
+const pod = (name: string, overrides: Partial<PodRow> = {}): PodRow => ({
+  namespace: "db3",
+  name,
+  owner_kind: "StatefulSet",
+  owner_name: `db-${name}`,
+  component: "ingester",
+  cluster_id: "cluster-1",
+  node: "node-a",
+  phase: "Running",
+  ready: true,
+  restarts: 0,
+  start_time: null,
+  age: "1m",
+  inferred_component: false,
+  images: ["ghcr.io/influxdata/influxdb:3.0"],
+  containers: [],
+  labels: {},
+  mode: "ingest",
+  ...overrides,
 });
 
-test("pods with a component are ranked ahead of the cap", () => {
-  const data = snapshot(100);
-  // 50 pods carry no component and are listed first, 50 database pods follow.
-  // A plain slice to the cap would take the 50 unrelated pods plus 30 database
-  // ones and lose the rest; ranking keeps every database pod inside the budget.
-  data.pods = Array.from({ length: 100 }, (_, n) => ({ ...pod(n), component: n < 50 ? null : "ingester" }));
-  data.services = [];
-  data.nodes = [];
-  render(<Topology snapshot={data} />);
-  expect(screen.getByText(/^Workloads/).textContent).toMatch(/\(80\)/);
-  expect(screen.getByRole("button", { name: /db-99,/ })).toBeInTheDocument();
-  // The cap admits the 50 database pods plus 30 unrelated ones, so pods 30-49
-  // are the ones dropped and their workloads are not drawn.
-  expect(screen.getByRole("button", { name: /db-0,/ })).toBeInTheDocument();
-  expect(screen.queryByRole("button", { name: /db-45,/ })).not.toBeInTheDocument();
+const snapshot = (pods: PodRow[], nodes: NodeRow[]): Snapshot =>
+  ({ pods, nodes, workloads: [], services: [] } as unknown as Snapshot);
+
+test("the selector lists every collected node, including one running nothing", () => {
+  render(
+    <Topology
+      snapshot={snapshot([pod("ingest-0")], [node("node-b"), node("node-a"), node("node-c")])}
+    />,
+  );
+  const select = screen.getByLabelText("Node") as HTMLSelectElement;
+  expect(Array.from(select.options).map((option) => option.value)).toEqual(["node-a", "node-b", "node-c"]);
+  // node-c hosts nothing; a node list derived from pods used to drop it.
+  expect(select.options[2].textContent).toMatch(/node-c/);
 });
 
-test("large graphs have explicit node edge and selector work budgets with partial notice", () => {
-  const { container } = render(<Topology snapshot={snapshot(100)} />);
-  expect(screen.getByText(/partial topology/i)).toBeInTheDocument();
-  expect(container.querySelectorAll(".topo-node").length).toBeLessThanOrEqual(240);
-  expect(container.querySelectorAll(".topo-edge").length).toBeLessThanOrEqual(500);
+test("the first node is listed without any interaction", () => {
+  render(<Topology snapshot={snapshot([pod("ingest-0"), pod("other-0", { node: "node-b" })], [node("node-a"), node("node-b")])} />);
+  // A dropdown with an empty panel reads as broken, so the first node is shown.
+  expect(screen.getByText("ingest-0")).toBeInTheDocument();
+  expect(screen.queryByText("other-0")).not.toBeInTheDocument();
 });
 
-test("truncation reports what is shown against what exists", () => {
-  const data = snapshot(100);
-  data.nodes = Array.from({ length: 100 }, (_, n) => node(`node-${n}`));
-  render(<Topology snapshot={data} />);
-  const notice = screen.getByText(/partial topology/i).textContent ?? "";
-  expect(notice).toMatch(/80 of 100 pods/);
-  expect(notice).toMatch(/80 of 100 services/);
-  expect(notice).toMatch(/80 of 100 nodes/);
-});
-
-test("every collected service is listed, including one with no component", () => {
-  const data = snapshot(1);
-  data.services = [
-    { ...service(0), name: "db3-ingest", component: "ingester" },
-    { ...service(1), name: "kubernetes", component: null, selector: {} },
+test("picking a node lists everything it runs, kube-system omitted and counted", () => {
+  const pods = [
+    pod("ingest-0"),
+    pod("metrics-abc", { namespace: "db3", owner_kind: "DaemonSet", owner_name: "telegraf", component: null }),
+    pod("kube-proxy-x", { namespace: "kube-system", owner_kind: "DaemonSet", owner_name: "kube-proxy", component: null }),
+    pod("coredns-y", { namespace: "kube-system", owner_kind: "Deployment", owner_name: "coredns", component: null }),
   ];
-  render(<Topology snapshot={data} />);
-  // The second service is not database-related; it used to be filtered out
-  // entirely, which made the Services column under-report the cluster.
-  expect(screen.getByRole("button", { name: /db3-ingest,/ })).toBeInTheDocument();
-  expect(screen.getByRole("button", { name: /kubernetes,/ })).toBeInTheDocument();
+  render(<Topology snapshot={snapshot(pods, [node("node-a")])} />);
+  expect(screen.getByText("ingest-0")).toBeInTheDocument();
+  expect(screen.getByText("metrics-abc")).toBeInTheDocument();
+  // kube-system is plumbing, not deployment workload: omitted from the list but
+  // reported, so the omission is never mistaken for a collection failure.
+  expect(screen.queryByText("kube-proxy-x")).not.toBeInTheDocument();
+  expect(screen.queryByText("coredns-y")).not.toBeInTheDocument();
+  expect(screen.getByText(/2 kube-system pods hidden/)).toBeInTheDocument();
 });
 
-test("workloads without an InfluxDB component are still shown", () => {
-  const data = snapshot(1);
-  // Shape of a real cluster: a DaemonSet pod on a node, no InfluxDB labels.
-  data.pods = [
-    { ...pod(0), component: null, owner_kind: "DaemonSet", owner_name: "calico-node", node: "node-a" },
-  ];
-  data.workloads = [{ ...work(0), name: "calico-node", kind: "DaemonSet", component: null }];
-  data.services = [];
-  data.nodes = [node("node-a")];
-  render(<Topology snapshot={data} />);
-  expect(screen.getByRole("button", { name: /calico-node,/ })).toBeInTheDocument();
+test("selecting another node swaps the list", () => {
+  const pods = [pod("ingest-0"), pod("querier-0", { node: "node-b", component: "querier", owner_name: "db-querier" })];
+  render(<Topology snapshot={snapshot(pods, [node("node-a"), node("node-b")])} />);
+  expect(screen.getByText("ingest-0")).toBeInTheDocument();
+  fireEvent.change(screen.getByLabelText("Node"), { target: { value: "node-b" } });
+  expect(screen.getByText("querier-0")).toBeInTheDocument();
+  expect(screen.queryByText("ingest-0")).not.toBeInTheDocument();
 });
 
-test("when services exceed the cap, database services keep their place", () => {
-  const data = snapshot(1);
-  data.pods = [pod(0)];
-  data.workloads = [work(0)];
-  // 100 unrelated services ahead of 5 database ones; a plain cap would drop the
-  // database services entirely.
-  data.services = [
-    ...Array.from({ length: 100 }, (_, n) => ({ ...service(n), name: `cluster-${n}`, component: null, selector: {} })),
-    ...Array.from({ length: 5 }, (_, n) => ({ ...service(200 + n), name: `db3-${n}`, component: "ingester" })),
+test("a node running only kube-system pods says so instead of looking empty", () => {
+  const pods = [
+    pod("ingest-0"),
+    pod("kube-proxy-x", { node: "node-b", namespace: "kube-system", owner_kind: "DaemonSet", owner_name: "kube-proxy", component: null }),
   ];
-  render(<Topology snapshot={data} />);
-  expect(screen.getByRole("button", { name: /db3-0,/ })).toBeInTheDocument();
-  expect(screen.getByText(/partial topology/i).textContent).toMatch(/80 of 105 services/);
+  render(<Topology snapshot={snapshot(pods, [node("node-a"), node("node-b")])} />);
+  fireEvent.change(screen.getByLabelText("Node"), { target: { value: "node-b" } });
+  expect(screen.getByText(/Nothing runs on node-b outside kube-system/)).toBeInTheDocument();
+  expect(screen.getByText(/1 kube-system pod hidden/)).toBeInTheDocument();
+});
+
+test("no collected nodes renders an empty state pointing at the collectors", () => {
+  render(<Topology snapshot={snapshot([pod("ingest-0", { node: null })], [])} />);
+  expect(screen.getByText(/No nodes were collected/)).toBeInTheDocument();
+});
+
+test("pods scheduled on no node are reported rather than silently dropped", () => {
+  const pods = [pod("ingest-0"), pod("pending-0", { node: null, ready: false, phase: "Pending" })];
+  render(<Topology snapshot={snapshot(pods, [node("node-a")])} />);
+  expect(screen.getByText(/1 pod is not scheduled on any node/)).toBeInTheDocument();
+});
+
+test("database roles are ranked ahead of other workloads on the same node", () => {
+  const pods = [
+    pod("aaa-cluster-svc", { namespace: "db3", owner_kind: "DaemonSet", owner_name: "calico-node", component: null }),
+    pod("zzz-ingest-0", { component: "ingester" }),
+  ];
+  const { container } = render(<Topology snapshot={snapshot(pods, [node("node-a")])} />);
+  const firstRow = container.querySelector("tbody tr");
+  expect(firstRow?.textContent).toContain("zzz-ingest-0");
 });

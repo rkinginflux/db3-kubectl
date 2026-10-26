@@ -252,9 +252,9 @@ cd ..
 cargo build --locked --release
 ```
 
-Views: Overview, Topology (nodes → workloads → services, edges derived from pod
-scheduling and selectors), InfluxDB 3, Kubernetes, Helm, Config & secrets,
-Events, Logs, and Query (only with `--query`). The theme toggle (or `t`) switches light/dark; dark is the default
+Views: Overview, Topology (a node picker plus everything that node runs),
+InfluxDB 3, Kubernetes, Helm, Config & secrets, Events, Logs, and Query (only
+with `--query`). The theme toggle (or `t`) switches light/dark; dark is the default
 and the choice is stored in `localStorage`. `r` refreshes. Routes are hashes
 (`#topology`), so a bookmark survives a reload.
 
@@ -278,9 +278,10 @@ still renders.
 **No InfluxDB 3 cluster.** The deployment may use different role labels. Check
 `kubectl get pods -A --show-labels`; if the component label differs, the pod
 name heuristics may still catch it (marked `~`). The Topology view does not
-depend on this: it draws every node, every workload that owns a visible pod, and
-every service, so a non-InfluxDB or differently-labelled environment still
-renders. A role that cannot be identified stays unknown rather than guessed.
+depend on this: it lists every collected node and, for the selected one, every
+pod scheduled there with its owning workload, so a non-InfluxDB or
+differently-labelled environment still renders. A role that cannot be identified
+stays unknown rather than guessed.
 
 **Endpoints show zero ready.** `endpointslices.discovery.k8s.io` may be
 forbidden by RBAC on older clusters. Check the Collectors panel for that
@@ -313,15 +314,13 @@ contain a recognised database pod).
   local processes or malicious browser extensions. A non-loopback bind is not
   an anonymous remote service: it warns on startup and exposes the snapshot to
   anyone who can reach the port, so keep it behind a trusted network boundary.
-- Resource arrays are capped at 500 entries and service matching at 50,000
-  comparisons with visible partial/truncation findings. The browser topology
-  caps each input column at 80, edges at 500, and relationship/selector work at
-  20,000; rows are ranked before the cap so a relevant row cannot be displaced
-  by unrelated ones. The Nodes and Services columns list every collected node
-  and service, and the Workloads column lists every workload that owns a visible
-  pod, not only the database-related ones; components are used only for ranking.
-  Its partial notice reports how many rows are shown against how many exist, and
-  includes unmapped ownership. Only observed namespace + owner kind/name links
+- Resource arrays are capped at 500 entries per type, so the snapshot itself can
+  be short of a very large cluster's truth; the Topology view says so when pod
+  collection reaches that bound. It lists every collected node with no separate
+  cap, buckets every collected pod by node, ranks pods carrying a database
+  component first, and pages the table instead of slicing it. `kube-system` pods
+  are omitted from the list and reported as a count, pods scheduled on no node
+  are reported separately, and only observed namespace + owner kind/name links
   are used, not same-role guesses; a ReplicaSet owner is followed one level to
   its Deployment through the ReplicaSet's recorded owner reference.
 - A missing role means not observed in this scope, not proof it is absent.

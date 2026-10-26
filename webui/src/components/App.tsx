@@ -36,7 +36,7 @@ const NAV: NavItem[] = [
 
 const TITLES: Record<ViewKey, { title: string; subtitle: string }> = {
   overview: { title: "Overview", subtitle: "Readiness, findings and cluster identity" },
-  topology: { title: "Topology", subtitle: "Nodes, database workloads and service routing" },
+  topology: { title: "Topology", subtitle: "What each node runs, with kube-system omitted" },
   db3: { title: "InfluxDB 3", subtitle: "Clusters, roles, pods and licensing" },
   kubernetes: { title: "Kubernetes", subtitle: "Nodes, workloads, services, storage and policies" },
   helm: { title: "Helm", subtitle: "Releases, chart pins and revision state" },
