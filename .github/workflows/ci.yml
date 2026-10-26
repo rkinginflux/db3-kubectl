@@ -1,0 +1,49 @@
+name: CI
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  build-and-test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: webui/package-lock.json
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - name: Test and rebuild embedded React assets
+        working-directory: webui
+        run: |
+          npm ci
+          npm test
+          npm run typecheck
+          npm run build
+          npm run check:reproducible
+          npm audit --audit-level=high
+      - name: Require committed singlefile to match source
+        run: git diff --exit-code -- webui/dist
+      - name: Rust formatting and lint
+        run: |
+          cargo fmt --check
+          cargo clippy --locked --all-targets -- -D warnings
+      - name: Native regressions, real HTTP lifecycle tests and documentation
+        run: |
+          cargo test --locked
+          cargo test --locked --release
+          cargo doc --locked --no-deps
+          cargo build --locked --release
+      - name: Temporary fixture-only real-HTTP smoke
+        run: python3 scripts/webui_fixture.py target/webui-smoke --binary target/release/kubectl-db3
+      - name: Existing Python support compatibility tests
+        run: DB3_BINARY="$PWD/target/release/kubectl-db3" python3 -m unittest discover -s tests -v

@@ -1,0 +1,103 @@
+# Read-only identity for the db3 environment console.
+#
+# Apply once per cluster:
+#   kubectl apply -f deploy/webui/rbac.yaml
+#   # or, without a checkout:
+#   kubectl db3 webui --manifest | kubectl apply -f -
+#
+# The console itself reads the cluster through your kubeconfig, so this
+# manifest is not strictly required for an administrator workstation. It
+# exists so the exact least-privilege surface is reviewable, and so a shared
+# automation identity can read the same data without cluster-admin:
+#
+#   kubectl --as=system:serviceaccount:db3-webui:db3-webui get pods -A
+#
+# No write/exec or Secret grants. Secret metadata is opt-in and requires a
+# separately reviewed scoped grant: Kubernetes has no metadata-only Secret verb.
+# Helm normal release storage may require Secret reads; do not broaden this role.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: db3-webui
+  labels:
+    app.kubernetes.io/name: db3-webui
+    app.kubernetes.io/part-of: influxdb3-observability
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: db3-webui
+  namespace: db3-webui
+  labels:
+    app.kubernetes.io/name: db3-webui
+automountServiceAccountToken: false
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: db3-webui-readonly
+  labels:
+    app.kubernetes.io/name: db3-webui
+rules:
+  - apiGroups: [""]
+    resources:
+      - nodes
+      - namespaces
+      - pods
+      - services
+      - endpoints
+      - configmaps
+      - events
+      - persistentvolumes
+      - persistentvolumeclaims
+      - resourcequotas
+      - limitranges
+    verbs: ["get", "list", "watch"]
+  - apiGroups: [""]
+    resources:
+      - pods/log
+    verbs: ["get"]
+  - apiGroups: ["apps"]
+    resources:
+      - statefulsets
+      - deployments
+      - daemonsets
+      - replicasets
+    verbs: ["get", "list", "watch"]
+  - apiGroups: ["discovery.k8s.io"]
+    resources:
+      - endpointslices
+    verbs: ["get", "list", "watch"]
+  - apiGroups: ["storage.k8s.io"]
+    resources:
+      - storageclasses
+      - volumeattachments
+    verbs: ["get", "list", "watch"]
+  - apiGroups: ["networking.k8s.io"]
+    resources:
+      - networkpolicies
+      - ingresses
+    verbs: ["get", "list", "watch"]
+  - apiGroups: ["apiextensions.k8s.io"]
+    resources:
+      - customresourcedefinitions
+    verbs: ["get", "list"]
+  # InfluxDB 3 custom resources, if the deployment is operator-managed.
+  - apiGroups: ["influxdata.com"]
+    resources: ["*"]
+    verbs: ["get", "list", "watch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: db3-webui-readonly
+  labels:
+    app.kubernetes.io/name: db3-webui
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: db3-webui-readonly
+subjects:
+  - kind: ServiceAccount
+    name: db3-webui
+    namespace: db3-webui
