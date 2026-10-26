@@ -58,3 +58,31 @@ test("truncation reports what is shown against what exists", () => {
   expect(notice).toMatch(/80 of 100 services/);
   expect(notice).toMatch(/80 of 100 nodes/);
 });
+
+test("every collected service is listed, including one with no component", () => {
+  const data = snapshot(1);
+  data.services = [
+    { ...service(0), name: "db3-ingest", component: "ingester" },
+    { ...service(1), name: "kubernetes", component: null, selector: {} },
+  ];
+  render(<Topology snapshot={data} />);
+  // The second service is not database-related; it used to be filtered out
+  // entirely, which made the Services column under-report the cluster.
+  expect(screen.getByRole("button", { name: /db3-ingest,/ })).toBeInTheDocument();
+  expect(screen.getByRole("button", { name: /kubernetes,/ })).toBeInTheDocument();
+});
+
+test("when services exceed the cap, database services keep their place", () => {
+  const data = snapshot(1);
+  data.pods = [pod(0)];
+  data.workloads = [work(0)];
+  // 100 unrelated services ahead of 5 database ones; a plain cap would drop the
+  // database services entirely.
+  data.services = [
+    ...Array.from({ length: 100 }, (_, n) => ({ ...service(n), name: `cluster-${n}`, component: null, selector: {} })),
+    ...Array.from({ length: 5 }, (_, n) => ({ ...service(200 + n), name: `db3-${n}`, component: "ingester" })),
+  ];
+  render(<Topology snapshot={data} />);
+  expect(screen.getByRole("button", { name: /db3-0,/ })).toBeInTheDocument();
+  expect(screen.getByText(/partial topology/i).textContent).toMatch(/80 of 105 services/);
+});
