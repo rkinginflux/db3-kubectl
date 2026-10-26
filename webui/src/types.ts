@@ -272,3 +272,18 @@ export interface LogsResponse {
   error: string | null;
   lines: string;
 }
+
+export interface QueryResponse {
+  namespace: string;
+  pod: string;
+  container: string | null;
+  database: string;
+  language: "sql" | "influxql";
+  statement: string;
+  columns: string[];
+  rows: Record<string, unknown>[];
+  row_count: number;
+  truncated: boolean;
+  redacted: boolean;
+  error: string | null;
+}

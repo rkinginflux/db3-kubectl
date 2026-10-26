@@ -56,7 +56,13 @@ case "$args" in
   *"get events"*) cat "$DIR/events.json" ;;
   *"get configmaps"*) cat "$DIR/configmaps.json" ;;
   *"get secrets"*) cat "$DIR/secrets.json" ;;
-  *"logs "*) printf 'line one\nline two token=%s\n' "$INFLUXDB3_TOKEN" ;;
+  *"logs "*)
+    printf 'line one\nline two token=%s\n' "$INFLUXDB3_TOKEN" ;;
+  *"db3-query query"*)
+    case "$args" in
+      *FAILME*) echo "query failed: unknown measurement" >&2 ; exit 3 ;;
+    esac
+    cat "$DIR/query.json" ;;
   *) echo "fake kubectl: unsupported args: $args" >&2; exit 1 ;;
 esac
 "#
@@ -176,6 +182,11 @@ fn fixture() -> tempfile::TempDir {
         "helm.json",
         r#"[{"name":"db3","namespace":"influxdb3","revision":"3","updated":"2026-10-24 10:00:00 +0000 UTC",
             "status":"deployed","chart":"influxdb3-enterprise-0.4.2","app_version":"3.11.0"}]"#,
+    );
+    write_fixture(
+        dir.path(),
+        "query.json",
+        r#"[{"time":"2026-01-01T00:00:00Z","value":1.5},{"time":"2026-01-01T01:00:00Z","value":2.5}]"#,
     );
     dir
 }
@@ -693,6 +704,116 @@ fn logs_are_bounded_and_tokens_are_redacted() {
     let (status, body) = http(server.port, "/some/deep/link");
     assert_eq!(status, 200);
     assert!(body.contains("Environment Console"));
+}
+
+#[test]
+fn query_terminal_is_opt_in() {
+    let dir = fixture();
+    // A token alone must not enable it.
+    let server = start_with(dir.path(), &[], &[("INFLUXDB3_TOKEN", "apiv3_off")]);
+    let (status, body) = http(
+        server.port,
+        "/api/query?namespace=influxdb3&pod=db3-ingester-0&database=mydb&q=SELECT%201",
+    );
+    assert_eq!(status, 403, "{body}");
+    assert!(body.contains("disabled"), "{body}");
+}
+
+#[test]
+fn query_terminal_returns_rows_and_keeps_the_token_off_argv() {
+    let dir = fixture();
+    let token = "apiv3_query-secret-token";
+    let server = start_with(dir.path(), &["--query"], &[("INFLUXDB3_TOKEN", token)]);
+
+    let (status, body) = http(
+        server.port,
+        "/api/query?namespace=influxdb3&pod=db3-ingester-0&database=mydb&language=sql&q=SELECT%20*%20FROM%20home",
+    );
+    assert_eq!(status, 200, "{body}");
+    let value: Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(value["database"], "mydb");
+    assert_eq!(value["language"], "sql");
+    assert_eq!(value["row_count"], 2);
+    assert_eq!(value["truncated"], false);
+    assert_eq!(value["redacted"], true);
+    assert_eq!(value["columns"][0], "time");
+    assert_eq!(value["rows"][1]["value"], 2.5);
+    assert!(
+        !body.contains(token),
+        "the admin token must never reach the payload"
+    );
+
+    // The remote command shape, and proof the token travels on stdin only.
+    let calls = fs::read_to_string(dir.path().join("kubectl-calls")).unwrap();
+    assert!(
+        calls.contains("exec -i db3-ingester-0 -n influxdb3"),
+        "{calls}"
+    );
+    assert!(calls.contains("--database mydb"), "{calls}");
+    assert!(calls.contains("--language sql"), "{calls}");
+    assert!(calls.contains("--format json"), "{calls}");
+    assert!(
+        !calls.contains(token),
+        "the token must travel on stdin, never in argv: {calls}"
+    );
+}
+
+#[test]
+fn query_terminal_rejects_non_read_only_statements_before_running_kubectl() {
+    let dir = fixture();
+    let server = start_with(dir.path(), &["--query"], &[("INFLUXDB3_TOKEN", "apiv3_t")]);
+    for statement in [
+        "DROP%20TABLE%20home",
+        "INSERT%20INTO%20home%20VALUES%20(1)",
+        "SELECT%201%3B%20DROP%20TABLE%20home",
+        "SELECT%20*%20INTO%20copy%20FROM%20home",
+    ] {
+        let (status, body) = http(
+            server.port,
+            &format!(
+                "/api/query?namespace=influxdb3&pod=db3-ingester-0&database=mydb&q={statement}"
+            ),
+        );
+        assert_eq!(status, 400, "should reject {statement}: {body}");
+    }
+    let calls = dir.path().join("kubectl-calls");
+    assert!(
+        !calls.exists() || !fs::read_to_string(&calls).unwrap().contains("db3-query"),
+        "a rejected statement must not reach the cluster"
+    );
+}
+
+#[test]
+fn query_terminal_surfaces_the_database_error() {
+    let dir = fixture();
+    let token = "apiv3_error-token";
+    let server = start_with(dir.path(), &["--query"], &[("INFLUXDB3_TOKEN", token)]);
+    let (status, body) = http(
+        server.port,
+        "/api/query?namespace=influxdb3&pod=db3-ingester-0&database=mydb&q=SELECT%20FAILME",
+    );
+    assert_eq!(status, 200, "{body}");
+    let value: Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(value["row_count"], 0);
+    let error = value["error"].as_str().unwrap_or_default();
+    assert!(error.contains("unknown measurement"), "{error}");
+    assert!(!body.contains(token), "{body}");
+}
+
+#[test]
+fn query_terminal_requires_an_admin_token() {
+    let dir = tempfile::tempdir().unwrap();
+    let output = env_command(dir.path())
+        .args(["webui", "--query", "--port", "0"])
+        .output()
+        .unwrap();
+    assert!(!output.status.success());
+    let combined = format!(
+        "{}{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(combined.contains("INFLUXDB3_TOKEN"), "{combined}");
 }
 
 #[test]

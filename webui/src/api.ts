@@ -1,4 +1,4 @@
-import type { LogsResponse, Snapshot } from "./types";
+import type { LogsResponse, QueryResponse, Snapshot } from "./types";
 
 export interface SnapshotParams {
   namespace: string | null;
@@ -40,4 +40,25 @@ export async function fetchLogs(
 
 export async function fetchHealth(): Promise<{ ok: boolean; version: string }> {
   return json(await request("/api/health"));
+}
+
+export interface QueryParams {
+  namespace: string;
+  pod: string;
+  container: string | null;
+  database: string;
+  language: "sql" | "influxql";
+  statement: string;
+}
+
+export async function runQuery(params: QueryParams): Promise<QueryResponse> {
+  const search = new URLSearchParams({
+    namespace: params.namespace,
+    pod: params.pod,
+    database: params.database,
+    language: params.language,
+    q: params.statement,
+  });
+  if (params.container) search.set("container", params.container);
+  return json<QueryResponse>(await request(`/api/query?${search}`));
 }
