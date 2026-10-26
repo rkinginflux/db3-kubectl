@@ -103,7 +103,8 @@ React's script-string literals and accidental session replacement in JS checks.
   of the observed owner's desired=2. Kind/name/namespace ownership now passes;
   ambiguous references initially chose arbitrarily, now remain unknown.
   Additional checks cover owner deduplication, summed verified distinct owners,
-  namespace separation and uninferred ReplicaSet ancestry.
+  namespace separation and ReplicaSet ancestry resolved through the recorded
+  ReplicaSet owner rather than left uninferred.
 - Empty/failed-source Overview initially claimed every object healthy; the
   React regression now passes with observation-bounded wording, and the Helm
   view explicitly says disabled rather than reporting no releases.
@@ -208,4 +209,5 @@ HTTP sockets have two-second idle read/write bounds, not an absolute header
 wall-clock deadline against continuous trickle traffic; tiny_http connection
 parsing is retained. Local processes/extensions can read the bootstrap, and
 unknown credentials in actual application logs cannot be reliably redacted.
-ReplicaSet-to-Deployment ancestry is intentionally left unmapped.
+ReplicaSet-to-Deployment ancestry is resolved from the ReplicaSet's recorded
+owner reference, and falls back to unmapped only when that collector is denied.
