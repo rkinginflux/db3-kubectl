@@ -296,6 +296,26 @@ fn http(port: u16, path: &str) -> (u16, String) {
     (status, body)
 }
 
+/// Wait until `pid` has exited (gone from /proc) or is a zombie, up to `grace`.
+///
+/// The collector signals the process group before reaping its direct child, and
+/// an orphaned descendant is reaped asynchronously, so an immediate read of
+/// /proc races with process exit. This returns the last observed status, so the
+/// caller still fails if the process is genuinely alive after the grace period.
+fn wait_until_reaped(pid: &str, grace: Duration) -> String {
+    let deadline = Instant::now() + grace;
+    loop {
+        let status = fs::read_to_string(format!("/proc/{pid}/stat")).unwrap_or_default();
+        if status.is_empty() || status.split_whitespace().nth(2) == Some("Z") {
+            return status;
+        }
+        if Instant::now() >= deadline {
+            return status;
+        }
+        std::thread::sleep(Duration::from_millis(25));
+    }
+}
+
 fn raw_http(port: u16, path: &str, headers: &str) -> (u16, String) {
     raw_method(port, "GET", path, headers)
 }
@@ -528,7 +548,7 @@ fn active_collection_shutdown_kills_child_groups_and_reaps() {
     );
     let _ = request.join();
     for pid in pids.split_whitespace() {
-        let status = fs::read_to_string(format!("/proc/{pid}/stat")).unwrap_or_default();
+        let status = wait_until_reaped(pid, Duration::from_secs(5));
         assert!(
             status.is_empty() || status.split_whitespace().nth(2) == Some("Z"),
             "child still running: {pid}: {status}"
@@ -591,19 +611,12 @@ fn successful_collectors_clean_up_background_descendants() {
     // the orphaned descendant is reaped asynchronously. It can therefore still be
     // present for a moment after the snapshot returns, so allow a short grace
     // period. A descendant that is genuinely leaked still fails here.
-    let deadline = Instant::now() + Duration::from_secs(5);
     for pid in pids.split_whitespace() {
-        loop {
-            let status = fs::read_to_string(format!("/proc/{pid}/stat")).unwrap_or_default();
-            if status.is_empty() || status.split_whitespace().nth(2) == Some("Z") {
-                break;
-            }
-            assert!(
-                Instant::now() < deadline,
-                "successful collector left descendant alive: {pid}"
-            );
-            std::thread::sleep(Duration::from_millis(25));
-        }
+        let status = wait_until_reaped(pid, Duration::from_secs(5));
+        assert!(
+            status.is_empty() || status.split_whitespace().nth(2) == Some("Z"),
+            "successful collector left descendant alive: {pid}: {status}"
+        );
     }
 }
 
@@ -645,11 +658,17 @@ fn timeout_kills_and_reaps_collector_group_without_stderr_leak() {
     assert!(!body.contains("sensitive-metadata"));
     let pids = fs::read_to_string(dir.path().join("timeout-pids")).unwrap();
     for (index, pid) in pids.split_whitespace().enumerate() {
-        let stat = fs::read_to_string(format!("/proc/{pid}/stat")).unwrap_or_default();
         if index == 0 {
+            // The direct child is reaped synchronously by the collector before it
+            // reports, so this stays strict.
+            let stat = fs::read_to_string(format!("/proc/{pid}/stat")).unwrap_or_default();
             assert!(stat.is_empty(), "direct child not reaped");
         } else {
-            assert!(stat.is_empty() || stat.split_whitespace().nth(2) == Some("Z"));
+            let stat = wait_until_reaped(pid, Duration::from_secs(5));
+            assert!(
+                stat.is_empty() || stat.split_whitespace().nth(2) == Some("Z"),
+                "descendant still running: {pid}: {stat}"
+            );
         }
     }
 }
