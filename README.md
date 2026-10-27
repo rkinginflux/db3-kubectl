@@ -9,7 +9,7 @@ This project is not an official product of InfluxData. See [trademark usage and 
 - kubectl on the administrator's PATH and a compiled `kubectl-db3` binary for your platform (Linux/macOS). Rust/Cargo is needed to build from source; Python 3 is needed only for the optional compatibility-test harness. Node.js 22.12+ (22.x or 24+) is needed only to rebuild/test the embedded console frontend.
 - For JSON support collection: a kubeconfig with permission to create `pods/exec` sessions, `sh` and `influxdb3` on PATH in the selected container, and a server reachable by that container's CLI (normally http://127.0.0.1:8181). The container's host/TLS environment is honored. The plugin does not port-forward or discover credentials.
 - For log collection: permission to list pods and read `pods/log` in the selected namespace. No database CLI or admin token is required.
-- For the environment console: read access to nodes, pods, services, workloads, EndpointSlices, storage objects, events, and ConfigMaps. Secret collection is off by default; `--include-secret-metadata` opts into names/keys and needs separately reviewed Secret permissions. Helm is disabled unless `--helm` explicitly allows Helm storage Secret reads under your credentials; this is independent of `--include-secret-metadata`. `--no-secrets` conflicts with both opt-ins. The `--query` panel additionally needs `pods/exec` create through your own kubeconfig and `INFLUXDB3_TOKEN` in the environment.
+- For the environment console: read access to nodes, pods, services, workloads, EndpointSlices, storage objects, events, and ConfigMaps. Secret collection is off by default; `--include-secret-metadata` opts into names/keys and needs separately reviewed Secret permissions. Helm releases are disabled unless `--helm` explicitly allows them; they are read from their storage Secrets with `kubectl`, so the `helm` binary is not required, and this needs `get secrets` under your credentials, independent of `--include-secret-metadata`. `--no-secrets` conflicts with both opt-ins. The `--query` panel additionally needs `pods/exec` create through your own kubeconfig and `INFLUXDB3_TOKEN` in the environment.
 - Environment variable `$KUBECONFIG` enabled
 
 ## Build and enable locally
@@ -200,7 +200,7 @@ be changed:
 
 ```sh
 kubectl db3 webui --port 9300                 # another port
-kubectl db3 webui --helm                    # opt in to Helm storage Secret reads
+kubectl db3 webui --helm                    # opt in to Helm release reads (kubectl only, no helm binary)
 kubectl db3 webui -n influxdb3 --context lab  # narrow scope
 kubectl db3 webui --no-secrets                # never read Secret objects
 kubectl db3 webui --query                     # opt in to the read-only query terminal

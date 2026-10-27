@@ -42,7 +42,7 @@ listening socket closes with the process, so nothing keeps serving.
 | `--timeout` | `60` | Per-collector timeout in seconds. |
 | `--include-secret-metadata` | off | Opt in to Secret names/type/key names; values are discarded, but Kubernetes requires full Secret read permission. |
 | `--no-secrets` | default behavior | Explicitly prohibit direct and Helm storage Secret reads; conflicts with both opt-ins. |
-| `--helm` | off | Explicitly allow Helm release collection, which may read/decode Secret-backed storage using operator credentials; independent of `--include-secret-metadata`. |
+| `--helm` | off | Explicitly allow Helm release collection. Releases are read from their storage Secrets through `kubectl`, so the `helm` binary is not required; this needs `get secrets` under your credentials and is independent of `--include-secret-metadata`. |
 | `--query` | off | Opt in to the read-only query terminal. Requires `INFLUXDB3_TOKEN` and `pods/exec` through your own kubeconfig. Accepts one `SELECT` or `SHOW` statement. |
 | `--manifest` | off | Print the read-only RBAC manifest and exit. |
 
@@ -105,7 +105,7 @@ the snapshot.
 | `persistentvolumeclaims` | `kubectl get persistentvolumeclaims [-A] -o json` |
 | `networkpolicies` | `kubectl get networkpolicies [-A] -o json` |
 | `events` | `kubectl get events [-A] -o json` |
-| `helm` | `helm list -A -o json` (only with `--helm`) |
+| `helm` | `kubectl get secrets -l owner=helm` and one `get secret` per release (only with `--helm`) |
 | `configmaps` | `kubectl get configmaps -n <db3 namespace> -o json` |
 | `secrets` | `kubectl get secrets -n <db3 namespace> -o json` (only with `--include-secret-metadata`) |
 
@@ -192,9 +192,11 @@ return JSON 404 instead of the app shell.
   full Secret objects reach kubectl and process memory before values are
   discarded: Kubernetes RBAC has no metadata-only Secret permission. Names
   and key names are deliberately exposed only by this explicit opt-in.
-  Independently, `--helm` explicitly permits Helm to read/decode its storage
-  Secrets (including stored values) under your credentials, though those values
-  are not returned in the console snapshot. `--no-secrets` conflicts with both
+  Independently, `--helm` explicitly permits the plugin to read/decode Helm
+  release storage Secrets (including stored values) under your credentials,
+  though only release metadata reaches the console snapshot and chart values
+  never leave the decoder. This path uses `kubectl`, not the `helm` binary, so it
+  works on a host that has only `kubectl`. `--no-secrets` conflicts with both
   opt-ins; `--include-secret-metadata --helm` can be used together.
 - Application logs may contain unknown credentials that cannot be identified
   automatically. Known exported `INFLUXDB3_TOKEN` is redacted from snapshot and
@@ -289,8 +291,10 @@ collector's error.
 
 **Helm releases missing.** Collection is disabled by default; the Helm view says
 "disabled; enable --helm", not that no releases exist. Opt in only after
-reviewing Helm storage Secret reads. With `--helm`, a missing client or denied
-read is a collector failure, not proof the cluster has no releases.
+reviewing Helm storage Secret reads. With `--helm`, a denied `get secrets`, or a
+release whose payload will not decode, is a collector failure — not proof the
+cluster has no releases. The `helm` binary is not needed: releases come from
+`kubectl get secrets -l owner=helm` plus one payload read per release.
 
 **Config panel says "configuration collection was skipped".** No pod matched
 the InfluxDB image check, so no namespace was considered a database namespace.
