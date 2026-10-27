@@ -41,3 +41,21 @@ fn save_never_overwrites_existing_files() {
     );
     assert_eq!(fs::read_to_string(path).unwrap(), "first");
 }
+
+#[test]
+fn info_selects_only_the_node_and_license_commands() {
+    // A rename in COMMANDS must not silently drop a command from `support info`.
+    for name in INFO_COMMANDS {
+        assert!(
+            COMMANDS.iter().any(|(candidate, _)| candidate == name),
+            "{name} is not in COMMANDS"
+        );
+    }
+    let selected: Vec<&str> = COMMANDS
+        .iter()
+        .filter(|(name, _)| INFO_COMMANDS.contains(name))
+        .map(|(name, _)| *name)
+        .collect();
+    assert_eq!(selected, INFO_COMMANDS);
+    assert!(!selected.contains(&"databases"));
+}

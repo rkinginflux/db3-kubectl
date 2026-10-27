@@ -130,6 +130,30 @@ influxdb3 show databases --format json
 
 When `INFLUXDB3_TOKEN` is nonempty, each command receives `--token "$token"`. This mapping is explicit: the database CLI's native environment variable can differ (`INFLUXDB3_AUTH_TOKEN` in the local Enterprise source), so simply forwarding `INFLUXDB3_TOKEN` would not suffice.
 
+To print just two of those three results, without creating a bundle:
+
+```sh
+kubectl db3 support info --pod influxdb3-0 --namespace influxdb3
+```
+
+That runs only `show nodes` and `show license info` and writes one JSON document to
+stdout, so it pipes straight into `jq`. Nothing is written to disk, and `--output` is
+refused rather than silently ignored:
+
+```json
+{
+  "nodes": { "...": "influxdb3 show nodes output" },
+  "license-info": { "...": "influxdb3 show license info output" }
+}
+```
+
+```sh
+kubectl db3 support info --pod influxdb3-0 | jq '.["license-info"]'
+```
+
+If one command fails, the other is still printed, the failing key is `null`, the
+diagnostic goes to stderr, and the exit status is non-zero.
+
 The token travels over kubectl exec stdin, not in the local kubectl command arguments or the Kubernetes exec command URL. The Rust implementation prepares stdin in an anonymous, owner-only temporary file to avoid blocked pipe writes; credential bytes can therefore touch local temporary storage until that handle closes. Captured stdout/stderr are also temporarily file-backed before being read for redaction. The token is not written intentionally to the bundle; exact plaintext and JSON-escaped occurrences are redacted from captured command output. However, the remote database CLI process receives `--token`, so privileged observers inside the pod can inspect its arguments. A privileged process on the administrator's machine can also inspect the exported environment. This is not a guarantee against all credential disclosure or an exhaustive sanitizer of server output. With no plugin token, no `--token` argument is added; the container CLI's own authentication environment/configuration still applies.
 
 Do not paste real tokens into issue reports. Review all bundle contents before sharing: node names, database names, license information, and diagnostics can be sensitive. No automatic upload occurs.
