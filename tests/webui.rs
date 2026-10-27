@@ -48,6 +48,8 @@ case "$args" in
   *"get pods"*) cat "$DIR/pods.json" ;;
   *"get statefulsets,deployments,daemonsets"*) cat "$DIR/workloads.json" ;;
 *"get replicasets"*) cat "$DIR/replicasets.json" ;;
+*"owner=helm"*) printf 'influxdb3|db3|1|sh.helm.release.v1.db3.v1\n' ;;
+*"data.release"*) printf '%s' 'SDRzSUFBQUFBQUFDLzAyT3dRNkNNQkJFLzJYUGxCUXdIdm9keElNWHM4SWlqYVZ0dWkzUkVQNWRpb2FZN0dIblpXZG5GckE0RVNqbzd3MFV1MkNQWFNiYURpYTl2bnltd05wWlVGV1J1UU8xQUVlTWliT1Z2SEZ2NnJjN2d4eHZoMVpReS9vc0tpbHEyVXFwOXJuQ1drQTNZb2o1eVVRUmU0eVk5MStUSTFlUWpSUjgwRXovRlVDV3A3TGVDSHAvT1dCVFZsVXAveTFyem5GMjBJLzhIUHRKMjlZOUtSOXo4aFFFVXhjb2lwSE1KR1kwaVhqemZBQW1wS2hIRVFFQUFBPT0=' ;;
   *"get services"*) cat "$DIR/services.json" ;;
   *"get endpointslices"*) cat "$DIR/endpointslices.json" ;;
   *"get storageclasses"*) printf '{"items":[]}' ;;
@@ -809,9 +811,15 @@ fn serves_app_shell_and_redacted_snapshot() {
     );
     assert_eq!(value["secret_values_exposed"], false);
 
-    // Helm is read as its own program, not through kubectl.
+    // Helm releases are read from their storage Secrets through kubectl, so no
+    // helm binary is needed. Only metadata may surface: the payload carries
+    // chart values, and those must never reach the snapshot.
     assert_eq!(value["helm"][0]["name"], "db3");
     assert_eq!(value["helm"][0]["chart"], "influxdb3-enterprise-0.4.2");
+    assert_eq!(value["helm"][0]["app_version"], "3.11.0-enterprise");
+    assert_eq!(value["helm"][0]["status"], "deployed");
+    assert_eq!(value["helm"][0]["revision"], "1");
+    assert!(!value.to_string().contains("super-secret-helm-values"));
 }
 
 #[test]
@@ -1249,6 +1257,11 @@ fn helm_is_never_invoked_without_explicit_opt_in() {
             !dir.path().join("helm-calls").exists(),
             "default collection invoked Helm"
         );
+        let calls = fs::read_to_string(dir.path().join("kubectl-calls")).unwrap_or_default();
+        assert!(
+            !calls.lines().any(|line| line.contains("owner=helm")),
+            "default collection read Helm storage Secrets"
+        );
         assert_eq!(value["helm_enabled"], false);
         assert_eq!(value["helm"], serde_json::json!([]));
     }
@@ -1258,7 +1271,19 @@ fn helm_is_never_invoked_without_explicit_opt_in() {
     assert_eq!(value["helm_enabled"], true);
     assert_eq!(value["helm"][0]["name"], "db3");
     assert_eq!(value["secrets"], serde_json::json!([]));
-    assert!(dir.path().join("helm-calls").exists());
+    let calls = fs::read_to_string(dir.path().join("kubectl-calls")).unwrap();
+    assert!(
+        calls.lines().any(|line| line.contains("owner=helm")),
+        "helm storage was not read through kubectl"
+    );
+    assert!(
+        calls.lines().any(|line| line.contains("data.release")),
+        "release payload was not read"
+    );
+    assert!(
+        !dir.path().join("helm-calls").exists(),
+        "the helm binary must not be required"
+    );
 }
 
 #[test]

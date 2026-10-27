@@ -1015,7 +1015,7 @@ fn namespace_scoped(opts: &Options, mut args: Vec<String>) -> Vec<String> {
 }
 
 pub fn snapshot(opts: &Options) -> Value {
-    let mut phase_one = vec![
+    let phase_one = vec![
         Job {
             name: "kubectl-version",
             program: "kubectl",
@@ -1177,26 +1177,15 @@ pub fn snapshot(opts: &Options) -> Value {
             ),
         },
     ];
+    // Helm is collected after the parallel phase: it needs a per-release payload
+    // fetch that a fixed job list cannot express. See collect_helm.
+    let mut results = run_jobs(phase_one, opts);
+    let mut helm_rows: Vec<Value> = Vec::new();
     if opts.helm {
-        phase_one.push(Job {
-            name: "helm",
-            program: "helm",
-            args: {
-                let mut args = vec![
-                    "list".to_owned(),
-                    "-A".to_owned(),
-                    "-o".to_owned(),
-                    "json".to_owned(),
-                ];
-                if let Some(context) = opts.context.as_deref().filter(|value| !value.is_empty()) {
-                    args.push("--kube-context".to_owned());
-                    args.push(context.to_owned());
-                }
-                args
-            },
-        });
+        let (rows, outcome) = collect_helm(opts);
+        helm_rows = rows;
+        results.push(outcome);
     }
-    let results = run_jobs(phase_one, opts);
     let find = |name: &str| results.iter().find(|outcome| outcome.name == name);
 
     // ------------------------------------------------------------- cluster info
@@ -1264,12 +1253,7 @@ pub fn snapshot(opts: &Options) -> Value {
         .and_then(|outcome| outcome.value.as_ref())
         .map(endpoint_map)
         .unwrap_or_default();
-    let helm: Vec<Value> = find("helm")
-        .filter(|outcome| outcome.ok)
-        .and_then(|outcome| outcome.value.as_ref())
-        .and_then(Value::as_array)
-        .cloned()
-        .unwrap_or_default();
+    let helm: Vec<Value> = helm_rows;
 
     let mut issues: Vec<Value> = Vec::new();
     for outcome in &results {
@@ -1980,6 +1964,207 @@ pub fn snapshot(opts: &Options) -> Value {
     result
 }
 
+// ------------------------------------------------------------------- helm
+
+/// Helm 3 keeps every release revision in a Secret labelled `owner=helm`. The
+/// payload sits in `data.release` as base64(gzip(json)), and the Kubernetes API
+/// base64-encodes the whole `data` field again, so decoding is two steps.
+///
+/// Reading the payload requires `get secrets`, which the read-only ServiceAccount
+/// deliberately lacks — this is the `--helm` opt-in path, unchanged in posture
+/// from when the `helm` binary performed the same read.
+const HELM_RELEASE_LIMIT: usize = 200;
+const HELM_INDEX_JSONPATH: &str = r#"{range .items[*]}{.metadata.namespace}{"|"}{.metadata.labels.name}{"|"}{.metadata.labels.version}{"|"}{.metadata.name}{"\n"}{end}"#;
+const HELM_PAYLOAD_JSONPATH: &str = "{.data.release}";
+
+/// A sibling of `run_job` for commands whose output is text, not JSON.
+/// `run_job`'s JSON-only contract is load-bearing for every existing collector,
+/// so it must not be widened for helm's jsonpath output.
+fn capture_text(opts: &Options, program: &str, args: Vec<String>) -> Result<String, String> {
+    let mut argv = Vec::with_capacity(args.len() + 2);
+    if let Some(context) = opts.context.as_deref().filter(|value| !value.is_empty()) {
+        argv.push("--context".to_owned());
+        argv.push(context.to_owned());
+    }
+    argv.extend(args);
+    let captured = crate::webui_process::capture(program, &argv, opts.timeout, &opts.stop)
+        .map_err(|error| format!("could not run {program}: {error}"))?;
+    match captured.error {
+        Some(error) => Err(error),
+        None => Ok(captured.stdout),
+    }
+}
+
+/// `sh.helm.release.v1.<release>.v<revision>` -> (release, revision).
+fn helm_secret_parts(secret: &str) -> (String, u64) {
+    let trimmed = secret.strip_prefix("sh.helm.release.v1.").unwrap_or(secret);
+    match trimmed.rsplit_once(".v") {
+        Some((name, revision)) => (name.to_owned(), revision.parse().unwrap_or(0)),
+        None => (trimmed.to_owned(), 0),
+    }
+}
+
+/// Newest revision per release, as (namespace, secret name). Helm keeps a Secret
+/// per revision, so without this the panel would list every historical revision
+/// of the same release.
+fn parse_helm_index(index: &str) -> Vec<(String, String)> {
+    let mut newest: BTreeMap<(String, String), (u64, String)> = BTreeMap::new();
+    for line in index.lines() {
+        let mut fields = line.split('|');
+        let namespace = fields.next().unwrap_or("").trim();
+        let release = fields.next().unwrap_or("").trim();
+        let version = fields.next().unwrap_or("").trim();
+        let secret = fields.next().unwrap_or("").trim();
+        if namespace.is_empty() || secret.is_empty() {
+            continue;
+        }
+        let derived = helm_secret_parts(secret);
+        let release = if release.is_empty() {
+            derived.0
+        } else {
+            release.to_owned()
+        };
+        let revision = version.parse::<u64>().unwrap_or(derived.1);
+        newest
+            .entry((namespace.to_owned(), release))
+            .and_modify(|current| {
+                if revision > current.0 {
+                    *current = (revision, secret.to_owned());
+                }
+            })
+            .or_insert((revision, secret.to_owned()));
+    }
+    newest
+        .into_iter()
+        .map(|((namespace, _), (_, secret))| (namespace, secret))
+        .collect()
+}
+
+fn decode_helm_release(encoded: &str) -> Result<Value, String> {
+    use base64::Engine as _;
+    use std::io::Read as _;
+    let engine = base64::engine::general_purpose::STANDARD;
+    let outer = engine
+        .decode(encoded.trim())
+        .map_err(|error| format!("secret data is not base64: {error}"))?;
+    let inner = engine
+        .decode(&outer)
+        .map_err(|error| format!("helm payload is not base64: {error}"))?;
+    let mut json = String::new();
+    flate2::read::GzDecoder::new(&inner[..])
+        .read_to_string(&mut json)
+        .map_err(|error| format!("helm payload is not gzip: {error}"))?;
+    serde_json::from_str(&json).map_err(|error| format!("helm payload is not JSON: {error}"))
+}
+
+/// Project a release payload onto the row shape the console renders. Only
+/// metadata is taken: chart values and rendered manifests stay unread, so a
+/// credential in a values file cannot reach the snapshot.
+fn helm_release_row(payload: &Value) -> Option<Value> {
+    let name = payload.get("name")?.as_str()?;
+    let namespace = payload.get("namespace")?.as_str()?;
+    let chart = payload.get("chart")?.get("metadata")?;
+    let chart_name = chart.get("name")?.as_str()?;
+    let chart_version = chart.get("version")?.as_str()?;
+    let info = payload.get("info");
+    Some(json!({
+        "name": name,
+        "namespace": namespace,
+        "chart": format!("{chart_name}-{chart_version}"),
+        "app_version": chart.get("appVersion").and_then(Value::as_str).unwrap_or(""),
+        "status": info.and_then(|info| info.get("status")).and_then(Value::as_str).unwrap_or("unknown"),
+        "revision": payload.get("version").and_then(Value::as_u64).map(|revision| revision.to_string()).unwrap_or_default(),
+        "updated": info.and_then(|info| info.get("last_deployed")).and_then(Value::as_str).unwrap_or(""),
+    }))
+}
+
+/// Collect Helm releases through `kubectl` alone, so the console works on hosts
+/// without the `helm` binary. One index call, then one payload read per release.
+fn collect_helm(opts: &Options) -> (Vec<Value>, Outcome) {
+    let started = Instant::now();
+    let index_args = namespace_scoped(
+        opts,
+        vec![
+            "get".to_owned(),
+            "secrets".to_owned(),
+            "-l".to_owned(),
+            "owner=helm".to_owned(),
+            "-o".to_owned(),
+            format!("jsonpath={HELM_INDEX_JSONPATH}"),
+        ],
+    );
+    let index = match capture_text(opts, "kubectl", index_args) {
+        Ok(text) => text,
+        Err(error) => {
+            return (
+                Vec::new(),
+                Outcome {
+                    duration_ms: started.elapsed().as_millis() as u64,
+                    ..Outcome::failed("helm", error)
+                },
+            );
+        }
+    };
+    let targets = parse_helm_index(&index);
+    let mut rows: Vec<Value> = Vec::new();
+    let mut failures: Vec<String> = Vec::new();
+    let mut truncated = false;
+    for (position, (namespace, secret)) in targets.iter().enumerate() {
+        if opts.stop.load(std::sync::atomic::Ordering::SeqCst) {
+            break;
+        }
+        if position >= HELM_RELEASE_LIMIT {
+            truncated = true;
+            break;
+        }
+        let args = vec![
+            "get".to_owned(),
+            "secret".to_owned(),
+            "-n".to_owned(),
+            namespace.clone(),
+            secret.clone(),
+            "-o".to_owned(),
+            format!("jsonpath={HELM_PAYLOAD_JSONPATH}"),
+        ];
+        match capture_text(opts, "kubectl", args)
+            .and_then(|text| decode_helm_release(&text))
+            .and_then(|payload| {
+                helm_release_row(&payload)
+                    .ok_or_else(|| "release payload has no chart metadata".to_owned())
+            }) {
+            Ok(row) => rows.push(row),
+            Err(error) => failures.push(format!("{namespace}/{secret}: {error}")),
+        }
+    }
+    rows.sort_by(|left, right| {
+        (left["namespace"].as_str(), left["name"].as_str())
+            .cmp(&(right["namespace"].as_str(), right["name"].as_str()))
+    });
+    let error = if truncated {
+        Some(format!(
+            "release list truncated at {HELM_RELEASE_LIMIT} entries; observations are partial"
+        ))
+    } else {
+        failures.first().map(|first| {
+            format!(
+                "{} release(s) could not be decoded (first: {first})",
+                failures.len()
+            )
+        })
+    };
+    (
+        rows.clone(),
+        Outcome {
+            name: "helm",
+            ok: error.is_none(),
+            error,
+            duration_ms: started.elapsed().as_millis() as u64,
+            count: rows.len(),
+            value: Some(json!(rows)),
+        },
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2053,5 +2238,105 @@ mod tests {
         let row = pod_row(&pod_with_owner("DaemonSet", "calico-node"), &owners);
         assert_eq!(row["owner_kind"], json!("DaemonSet"));
         assert_eq!(row["owner_name"], json!("calico-node"));
+    }
+}
+
+#[cfg(test)]
+mod helm_tests {
+    use super::*;
+    use base64::Engine as _;
+    use std::io::Write as _;
+
+    fn encode_like_kubernetes(payload: &Value) -> String {
+        let raw = serde_json::to_vec(payload).unwrap();
+        let mut encoder = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::best());
+        encoder.write_all(&raw).unwrap();
+        let gzipped = encoder.finish().unwrap();
+        let engine = base64::engine::general_purpose::STANDARD;
+        // Helm's storage encodes base64(gzip(json)); the API base64-encodes again.
+        engine.encode(engine.encode(&gzipped))
+    }
+
+    fn payload() -> Value {
+        json!({
+            "name": "seaweedfs",
+            "namespace": "s3",
+            "version": 7,
+            "info": {"status": "deployed", "last_deployed": "2026-10-26T12:00:00Z"},
+            "chart": {"metadata": {"name": "seaweedfs", "version": "4.0.1", "appVersion": "3.71"}},
+            "config": {"s3SecretKey": "super-secret-values-entry"},
+            "manifest": "kind: Secret\nstringData:\n  key: super-secret-values-entry\n"
+        })
+    }
+
+    #[test]
+    fn decodes_both_base64_layers_and_projects_the_row() {
+        let encoded = encode_like_kubernetes(&payload());
+        let decoded = decode_helm_release(&encoded).expect("decodes");
+        let row = helm_release_row(&decoded).expect("projects");
+        assert_eq!(row["name"], json!("seaweedfs"));
+        assert_eq!(row["namespace"], json!("s3"));
+        assert_eq!(row["chart"], json!("seaweedfs-4.0.1"));
+        assert_eq!(row["app_version"], json!("3.71"));
+        assert_eq!(row["revision"], json!("7"));
+        assert_eq!(row["status"], json!("deployed"));
+        assert_eq!(row["updated"], json!("2026-10-26T12:00:00Z"));
+        // Chart values and rendered manifests never reach the row.
+        assert!(!row.to_string().contains("super-secret-values-entry"));
+    }
+
+    #[test]
+    fn a_payload_that_is_not_gzip_names_the_failing_layer() {
+        let engine = base64::engine::general_purpose::STANDARD;
+        let encoded = engine.encode(engine.encode(b"not gzip"));
+        let error = decode_helm_release(&encoded).unwrap_err();
+        assert!(error.contains("not gzip"), "{error}");
+    }
+
+    #[test]
+    fn index_keeps_the_newest_revision_per_release() {
+        let index = "s3|seaweedfs||sh.helm.release.v1.seaweedfs.v1\n\
+                     s3|seaweedfs|3|sh.helm.release.v1.seaweedfs.v3\n\
+                     s3|seaweedfs|2|sh.helm.release.v1.seaweedfs.v2\n\
+                     influxdb3|db3|1|sh.helm.release.v1.db3.v1\n";
+        assert_eq!(
+            parse_helm_index(index),
+            vec![
+                (
+                    "influxdb3".to_owned(),
+                    "sh.helm.release.v1.db3.v1".to_owned()
+                ),
+                (
+                    "s3".to_owned(),
+                    "sh.helm.release.v1.seaweedfs.v3".to_owned()
+                ),
+            ]
+        );
+    }
+
+    #[test]
+    fn index_without_labels_falls_back_to_the_secret_name() {
+        // Older releases may not carry the name/version labels.
+        let index = "s3|||sh.helm.release.v1.seaweedfs.v4\n";
+        assert_eq!(
+            parse_helm_index(index),
+            vec![(
+                "s3".to_owned(),
+                "sh.helm.release.v1.seaweedfs.v4".to_owned()
+            )]
+        );
+    }
+
+    #[test]
+    fn secret_parts_handles_the_helm_naming_convention() {
+        assert_eq!(
+            helm_secret_parts("sh.helm.release.v1.db3.v12"),
+            ("db3".to_owned(), 12)
+        );
+        // A name containing ".v" keeps everything before the final revision.
+        assert_eq!(
+            helm_secret_parts("sh.helm.release.v1.my.v.chart.v2"),
+            ("my.v.chart".to_owned(), 2)
+        );
     }
 }
