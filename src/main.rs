@@ -69,6 +69,24 @@ struct Support {
 enum SupportCommand {
     /// Collect logs from all pods matching a role label
     Logs(Logs),
+    /// Print `influxdb3 show license info` and `influxdb3 show nodes` as JSON
+    Info(Info),
+}
+
+#[derive(Args)]
+struct Info {
+    #[arg(long, env = "INFLUXDB3_POD")]
+    pod: Option<String>,
+    #[arg(short = 'c', long)]
+    container: Option<String>,
+    #[command(flatten)]
+    common: Common,
+}
+
+enum Action {
+    Json,
+    Logs(Logs),
+    Info,
 }
 pub(crate) const ROLES: [&str; 4] = ["querier", "processor", "ingester", "compactor"];
 #[derive(Args)]
@@ -116,31 +134,48 @@ fn main() {
         }
         Commands::Support(args) => args,
     };
-    let logs = match args.command.take() {
+    let action = match args.command.take() {
         Some(SupportCommand::Logs(mut logs)) => {
             args.common.override_with(std::mem::take(&mut logs.common));
             if logs.tail < -1 {
                 usage("--tail must be -1 or nonnegative");
             }
-            Some(logs)
+            Action::Logs(logs)
         }
-        None => None,
+        Some(SupportCommand::Info(mut info)) => {
+            args.common.override_with(std::mem::take(&mut info.common));
+            if info.pod.is_some() {
+                args.pod = info.pod;
+            }
+            if info.container.is_some() {
+                args.container = info.container;
+            }
+            Action::Info
+        }
+        None => Action::Json,
     };
     let timeout = args.common.timeout.unwrap_or(60.0);
     if !timeout.is_finite() || timeout <= 0.0 {
         usage("--timeout must be a finite positive number");
     }
     let token = std::env::var("INFLUXDB3_TOKEN").unwrap_or_default();
-    let result = if let Some(logs) = logs {
-        collect_logs(&args.common, &logs, &token, timeout)
-    } else {
-        if args.pod.as_deref().is_none_or(str::is_empty) {
-            usage("support requires --pod POD or INFLUXDB3_POD");
+    if token.contains(['\r', '\n']) {
+        usage("INFLUXDB3_TOKEN must be a single line");
+    }
+    let result = match action {
+        Action::Logs(logs) => collect_logs(&args.common, &logs, &token, timeout),
+        Action::Info => {
+            if args.common.output.is_some() {
+                usage("support info writes to stdout; --output is not used");
+            }
+            print_info(&args, &token, timeout)
         }
-        if token.contains(['\r', '\n']) {
-            usage("INFLUXDB3_TOKEN must be a single line");
+        Action::Json => {
+            if args.pod.as_deref().is_none_or(str::is_empty) {
+                usage("support requires --pod POD or INFLUXDB3_POD");
+            }
+            collect_json(&args, &token, timeout)
         }
-        collect_json(&args, &token, timeout)
     };
     match result {
         Ok(complete) => std::process::exit(if complete { 0 } else { 1 }),
@@ -469,5 +504,66 @@ fn collect_json(
         &(serde_json::to_string_pretty(&manifest)? + "\n"),
     )?;
     println!("Support bundle: {}", output.display());
+    Ok(complete)
+}
+
+/// The two commands `support info` prints. Both are read-only views of the
+/// running process, so neither needs the bundle machinery.
+const INFO_COMMANDS: &[&str] = &["nodes", "license-info"];
+
+/// Print `influxdb3 show nodes` and `influxdb3 show license info` as one JSON
+/// document on stdout: `{"nodes": {...}, "license-info": {...}}`. Nothing is
+/// written to disk, so a caller can pipe this straight into `jq`.
+fn print_info(
+    args: &Support,
+    token: &str,
+    timeout: f64,
+) -> Result<bool, Box<dyn std::error::Error>> {
+    let pod = args.pod.as_deref().unwrap_or_default();
+    if pod.is_empty() {
+        usage("support info requires --pod POD or INFLUXDB3_POD");
+    }
+    let mut base = prefix(&args.common);
+    base.extend(["exec".to_owned(), "-i".to_owned(), pod.to_owned()]);
+    if let Some(container) = args.container.as_ref().filter(|s| !s.is_empty()) {
+        base.extend(["-c".to_owned(), container.to_owned()]);
+    }
+    base.extend(["--", "sh", "-c", REMOTE, "db3-support"].map(str::to_owned));
+
+    let mut document = serde_json::Map::new();
+    let mut complete = true;
+    for (name, command) in COMMANDS
+        .iter()
+        .filter(|(name, _)| INFO_COMMANDS.contains(name))
+    {
+        let argv: Vec<String> = base
+            .iter()
+            .map(String::as_str)
+            .chain(command.iter().copied())
+            .map(str::to_owned)
+            .collect();
+        let captured = capture("kubectl", &argv, Some(token), timeout)?;
+        // Redact before parsing so a token echoed into a value cannot reach
+        // stdout on this path either.
+        let parsed = serde_json::from_str::<Value>(&redact(&captured.stdout, token)).ok();
+        let failure = captured.error.clone().or_else(|| {
+            parsed
+                .is_none()
+                .then(|| "command returned invalid JSON".to_owned())
+        });
+        if let Some(error) = failure {
+            complete = false;
+            eprintln!("db3: {name}: {error}");
+            let stderr = redact(captured.stderr.trim_end(), token);
+            if !stderr.is_empty() {
+                eprintln!("{stderr}");
+            }
+        }
+        document.insert((*name).to_owned(), parsed.unwrap_or(Value::Null));
+    }
+    println!(
+        "{}",
+        serde_json::to_string_pretty(&Value::Object(document))?
+    );
     Ok(complete)
 }

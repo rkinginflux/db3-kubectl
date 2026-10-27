@@ -174,6 +174,48 @@ print(json.dumps(sys.argv[1:]))
         self.assertTrue(json.loads((self.out / 'manifest.json').read_text())['complete'])
         self.assertEqual(len(self.calls()), 3)
 
+    def run_info(self, *extra):
+        return subprocess.run([os.environ.get('DB3_BINARY', str(ROOT / 'kubectl-db3')), 'support', 'info', '--pod', 'db3-0', *extra], env=self.env, capture_output=True, text=True)
+
+    def test_info_prints_only_node_and_license_json_to_stdout(self):
+        result = self.run_info('--namespace', 'database')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        calls = self.calls()
+        # Only the two requested commands run; databases is not collected.
+        self.assertEqual(len(calls), 2)
+        self.assertEqual(calls[0]['args'][:4], ['--namespace', 'database', 'exec', '-i'])
+        self.assertEqual(calls[0]['args'][-4:], ['show', 'nodes', '--format', 'json'])
+        self.assertEqual(calls[1]['args'][-5:], ['show', 'license', 'info', '--format', 'json'])
+        document = json.loads(result.stdout)
+        self.assertEqual(sorted(document), ['license-info', 'nodes'])
+        self.assertEqual(document['nodes'], {'collected': 'json'})
+        self.assertEqual(document['license-info'], {'collected': 'json'})
+        # This path writes nothing to disk.
+        self.assertFalse(self.out.exists())
+
+    def test_info_refuses_the_output_flag(self):
+        result = self.run_info('--output', str(self.out))
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn('stdout', result.stderr)
+        self.assertFalse(self.out.exists())
+
+    def test_info_requires_a_pod(self):
+        result = subprocess.run([os.environ.get('DB3_BINARY', str(ROOT / 'kubectl-db3')), 'support', 'info'], env=self.env, capture_output=True, text=True)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn('--pod', result.stderr)
+
+    def test_info_reports_failure_and_exits_nonzero(self):
+        failing = self.bin / 'kubectl'
+        failing.write_text("#!/bin/sh\necho 'nodes unavailable' >&2\nexit 1\n")
+        failing.chmod(0o755)
+        result = self.run_info()
+        self.assertEqual(result.returncode, 1)
+        self.assertIn('nodes unavailable', result.stderr)
+        document = json.loads(result.stdout)
+        # Partial data is still emitted so a caller can see what did arrive.
+        self.assertIsNone(document['nodes'])
+        self.assertIsNone(document['license-info'])
+
 
 if __name__ == '__main__':
     unittest.main()
