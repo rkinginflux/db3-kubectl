@@ -10,7 +10,7 @@ This project is not an official product of InfluxData. See [trademark usage and 
 - For JSON support collection: a kubeconfig with permission to create `pods/exec` sessions, `sh` and `influxdb3` on PATH in the selected container, and a server reachable by that container's CLI (normally http://127.0.0.1:8181). The container's host/TLS environment is honored. The plugin does not port-forward or discover credentials.
 - For log collection: permission to list pods and read `pods/log` in the selected namespace. No database CLI or admin token is required.
 - For the environment console: read access to nodes, pods, services, workloads, EndpointSlices, storage objects, events, and ConfigMaps. Secret collection is off by default; `--include-secret-metadata` opts into names/keys and needs separately reviewed Secret permissions. Helm is disabled unless `--helm` explicitly allows Helm storage Secret reads under your credentials; this is independent of `--include-secret-metadata`. `--no-secrets` conflicts with both opt-ins. The `--query` panel additionally needs `pods/exec` create through your own kubeconfig and `INFLUXDB3_TOKEN` in the environment.
-- Environmental variable `$KUBECONFIG` enabled
+- Environment variable `$KUBECONFIG` enabled
 
 ## Build and enable locally
 
