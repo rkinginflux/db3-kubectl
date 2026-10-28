@@ -1,7 +1,7 @@
 import { beforeEach, expect, test, vi } from "vitest";
 import { render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import { SUPPORT_PORTAL_URL, SupportHandoff, supportTemplate } from "./SupportHandoff";
+import { DEFAULT_SEVERITY, SUPPORT_PORTAL_URL, SupportHandoff, supportTemplate } from "./SupportHandoff";
 import type { Snapshot } from "../types";
 
 const snapshot = {
@@ -55,6 +55,25 @@ test("copying writes exactly the text that is displayed, nothing more", async ()
   await userEvent.click(screen.getByRole("button", { name: /copy for support/i }));
   expect(writeText).toHaveBeenCalledTimes(1);
   expect(writeText).toHaveBeenCalledWith(supportTemplate(baseProps));
+});
+
+test("severity defaults to Sev3", () => {
+  expect(DEFAULT_SEVERITY).toBe("Sev3");
+  expect(supportTemplate(baseProps)).toContain("Severity:    Sev3");
+  expect(supportTemplate(baseProps)).not.toContain("Sev1");
+});
+
+test("a promoted severity is what gets copied", async () => {
+  render(<SupportHandoff {...baseProps} />);
+  await userEvent.selectOptions(screen.getByLabelText(/case severity/i), "Sev1");
+  await userEvent.click(screen.getByRole("button", { name: /copy for support/i }));
+  expect(writeText).toHaveBeenCalledWith(expect.stringContaining("Severity:    Sev1"));
+  expect(writeText).not.toHaveBeenCalledWith(expect.stringContaining("Severity:    Sev3"));
+});
+
+test("the Sev1 phone-call requirement is stated in the UI", () => {
+  render(<SupportHandoff {...baseProps} />);
+  expect(screen.getByText(/Sev1 also has to be phoned in/i)).toBeInTheDocument();
 });
 
 test("the handoff performs no network request of its own", async () => {

@@ -148,8 +148,10 @@ console ever sending anything. The Logs view offers two controls:
 
 - **Copy for support** builds a short triage header (cluster server and
   Kubernetes version, kubeconfig context, pod and container, line count,
-  collection time, tool version, and whether a token was redacted) followed by
-  the log text, and puts it on the clipboard.
+  collection time, tool version, whether a token was redacted, and the selected
+  case severity) followed by the log text, and puts it on the clipboard. The
+  severity selector defaults to `Sev3`; a customer promoting the case to
+  `Sev1` is also told to phone it in, per policy §1.3.4.
 - **Open InfluxData support** is a plain link to
   <https://support.influxdata.com>, the support platform named in the InfluxData
   Support Policy (§1.3.1). That portal handles both new tickets and existing

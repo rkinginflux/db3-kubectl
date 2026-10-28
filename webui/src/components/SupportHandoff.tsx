@@ -18,17 +18,19 @@ export interface SupportHandoffProps {
 }
 
 /**
- * The text a customer pastes into a ticket: triage metadata first, so support
- * can route the case before reading the log body.
+ * Salesforce case severities. Sev3 is the default because the console is used
+ * for routine troubleshooting; a genuine outage is promoted by the customer.
+ * Sev1 must also be phoned in (InfluxData Support Policy §1.3.4), which is why
+ * the UI says so rather than implying the ticket alone is enough.
  */
-export function supportTemplate({
-  snapshot,
-  pod,
-  container,
-  tail,
-  logs,
-  redacted,
-}: SupportHandoffProps): string {
+export const SEVERITIES = ["Sev1", "Sev2", "Sev3", "Sev4"] as const;
+export const DEFAULT_SEVERITY = "Sev3";
+export type Severity = (typeof SEVERITIES)[number];
+
+export function supportTemplate(
+  { snapshot, pod, container, tail, logs, redacted }: SupportHandoffProps,
+  severity: Severity = DEFAULT_SEVERITY,
+): string {
   const cluster = snapshot.cluster ?? { server: "", version: "", platform: "" };
   const header = [
     "InfluxDB 3 Enterprise support request",
@@ -40,6 +42,8 @@ export function supportTemplate({
     `Collected:   ${snapshot.generated_at}`,
     `Tool:        kubectl-db3 ${snapshot.tool_version}`,
     `Redaction:   ${redacted ? "known admin token removed" : "no known token patterns found (review before sharing)"}`,
+    "",
+    `Severity:    ${severity}`,
     "",
     "What is happening:",
     "",
@@ -61,10 +65,11 @@ export function supportTemplate({
 export function SupportHandoff(props: SupportHandoffProps) {
   const { logs, pod, container, tail, redacted, snapshot } = props;
   const [state, setState] = useState<"idle" | "copied" | "failed">("idle");
+  const [severity, setSeverity] = useState<Severity>(DEFAULT_SEVERITY);
 
   const text = useMemo(
-    () => supportTemplate({ snapshot, pod, container, tail, logs, redacted }),
-    [snapshot, pod, container, tail, logs, redacted],
+    () => supportTemplate({ snapshot, pod, container, tail, logs, redacted }, severity),
+    [snapshot, pod, container, tail, logs, redacted, severity],
   );
 
   async function copyForSupport() {
@@ -89,10 +94,25 @@ export function SupportHandoff(props: SupportHandoffProps) {
         <a className="btn ghost small" href={SUPPORT_PORTAL_URL} target="_blank" rel="noopener noreferrer">
           Open InfluxData support ↗
         </a>
+        <label className="row" style={{ gap: 6, fontSize: 11.5 }}>
+          <span className="muted">Severity</span>
+          <select
+            value={severity}
+            onChange={(event) => setSeverity(event.target.value as Severity)}
+            aria-label="Case severity"
+          >
+            {SEVERITIES.map((value) => (
+              <option key={value} value={value}>
+                {value}
+              </option>
+            ))}
+          </select>
+        </label>
       </div>
       <p className="muted" style={{ margin: 0, fontSize: 11.5 }}>
         Copies these logs plus a short header for the case. Nothing is uploaded by this console: paste it into a new
-        or existing ticket at <code>support.influxdata.com</code>. Review the text before sharing.
+        or existing ticket at <code>support.influxdata.com</code> (Sev1 also has to be phoned in). Review the text
+        before sharing.
       </p>
     </div>
   );
