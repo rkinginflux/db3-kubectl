@@ -141,6 +141,28 @@ appearing unmapped. If `replicasets` is denied, the pod keeps its observed
 ReplicaSet owner and is shown as unmapped instead of being guessed from the
 name. A role with no observed pods is not inferred.
 
+## Customer support handoff
+
+Paywalled support customers can hand a log tail to InfluxData without the
+console ever sending anything. The Logs view offers two controls:
+
+- **Copy for support** builds a short triage header (cluster server and
+  Kubernetes version, kubeconfig context, pod and container, line count,
+  collection time, tool version, whether a token was redacted, and the selected
+  case severity) followed by the log text, and puts it on the clipboard. The
+  severity selector defaults to `Sev3`; a customer promoting the case to
+  `Sev1` is also told to phone it in, per policy §1.3.4.
+- **Open InfluxData support** is a plain link to
+  <https://support.influxdata.com>, the support platform named in the InfluxData
+  Support Policy (§1.3.1). That portal handles both new tickets and existing
+  ones, so the console does not need a case identifier and cannot list cases.
+
+The console holds no Salesforce credentials, makes no support-related network
+request, and never uploads log text. Copying is a clipboard write in the
+browser; opening the portal is a customer-initiated navigation. Only known
+admin-token patterns are redacted, so the copied text is the same text already
+on screen and must be reviewed before it is pasted into a ticket.
+
 ## HTTP API
 
 The console preserves its five API endpoints plus the app shell (GET/HEAD;
@@ -180,6 +202,9 @@ return JSON 404 instead of the app shell.
   even when the variable/key name looks harmless. Safe derived database mode,
   cluster ID, object-store, and license-presence observations are computed
   before display sanitization, preserving database details without raw values.
+- The console makes no outbound network request. There is no telemetry, no
+  update check, and no support upload: the support handoff copies text to the
+  clipboard and the customer pastes it into the portal themselves.
 - Raw collector stderr is discarded, not forwarded to errors or the logs API.
   Errors are generic status/timeout/limit messages, never arbitrary client text.
   The single exception is an operator-initiated `/api/query` failure, where the
