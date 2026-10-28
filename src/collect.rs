@@ -15,6 +15,9 @@ pub struct Options {
     pub timeout: f64,
     pub no_secrets: bool,
     pub helm: bool,
+    /// Mirrors `webui --info`, surfaced so the console can tell the browser
+    /// whether the Basic Information panel is allowed to run at all.
+    pub info: bool,
     pub stop: std::sync::Arc<std::sync::atomic::AtomicBool>,
 }
 
@@ -1934,6 +1937,7 @@ pub fn snapshot(opts: &Options) -> Value {
         },
         "helm": helm,
         "helm_enabled": opts.helm,
+        "info_enabled": opts.info,
         "configmaps": configmaps,
         "secrets": secrets,
         "secret_values_exposed": false,
