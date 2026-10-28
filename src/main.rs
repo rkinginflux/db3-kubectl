@@ -18,7 +18,7 @@ mod webui;
 mod webui_process;
 
 pub(crate) const REMOTE: &str = "IFS= read -r token\nif [ -n \"$token\" ]; then\n    exec influxdb3 \"$@\" --token \"$token\"\nfi\nexec influxdb3 \"$@\"\n";
-const COMMANDS: &[(&str, &[&str])] = &[
+pub(crate) const COMMANDS: &[(&str, &[&str])] = &[
     ("nodes", &["show", "nodes", "--format", "json"]),
     (
         "license-info",

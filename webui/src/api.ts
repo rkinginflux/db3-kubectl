@@ -1,4 +1,4 @@
-import type { LogsResponse, QueryResponse, Snapshot } from "./types";
+import type { InfoResponse, LogsResponse, QueryResponse, Snapshot } from "./types";
 
 export interface SnapshotParams {
   namespace: string | null;
@@ -61,4 +61,15 @@ export async function runQuery(params: QueryParams): Promise<QueryResponse> {
   });
   if (params.container) search.set("container", params.container);
   return json<QueryResponse>(await request(`/api/query?${search}`));
+}
+
+/** Runs `influxdb3 show nodes` and `show license info` in the pod via pods/exec. */
+export async function fetchInfo(params: {
+  namespace: string;
+  pod: string;
+  container: string | null;
+}): Promise<InfoResponse> {
+  const search = new URLSearchParams({ namespace: params.namespace, pod: params.pod });
+  if (params.container) search.set("container", params.container);
+  return json<InfoResponse>(await request(`/api/info?${search}`));
 }

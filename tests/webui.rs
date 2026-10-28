@@ -66,6 +66,8 @@ case "$args" in
       *FAILME*) echo "query failed: unknown measurement" >&2 ; exit 3 ;;
     esac
     cat "$DIR/query.json" ;;
+  *"db3-info show nodes"*) cat "$DIR/info-nodes.json" ;;
+  *"db3-info show license info"*) cat "$DIR/info-license.json" ;;
   *) echo "fake kubectl: unsupported args: $args" >&2; exit 1 ;;
 esac
 "#
@@ -90,6 +92,16 @@ fn fixture() -> tempfile::TempDir {
         dir.path(),
         "version.json",
         r#"{"serverVersion":{"gitVersion":"v1.35.4","platform":"linux/amd64"}}"#,
+    );
+    write_fixture(
+        dir.path(),
+        "info-nodes.json",
+        r#"{"nodes":[{"node_id":"node-a","role":"ingest","url":"http://db3-ingester-0:8181"}]}"#,
+    );
+    write_fixture(
+        dir.path(),
+        "info-license.json",
+        r#"{"license_type":"enterprise","expires":"2027-01-01","email":"ops@example.com"}"#,
     );
     write_fixture(
         dir.path(),
@@ -1564,4 +1576,99 @@ fn deployment_pods_resolve_through_the_collected_replicaset() {
         calls.lines().any(|line| line.contains("get replicasets")),
         "the collector must request replicasets to resolve ancestry"
     );
+}
+
+#[test]
+fn basic_information_is_opt_in() {
+    let dir = fixture();
+    // A token alone must not enable it, and kubectl must not be invoked at all.
+    let server = start_with(dir.path(), &[], &[("INFLUXDB3_TOKEN", "apiv3_off")]);
+    let (status, body) = http(
+        server.port,
+        "/api/info?namespace=influxdb3&pod=db3-ingester-0",
+    );
+    assert_eq!(status, 403, "{body}");
+    assert!(body.contains("disabled"), "{body}");
+
+    let calls = fs::read_to_string(dir.path().join("kubectl-calls")).unwrap_or_default();
+    assert!(
+        !calls.contains("db3-info"),
+        "a disabled panel must not exec into a pod: {calls}"
+    );
+}
+
+#[test]
+fn basic_information_returns_both_views_and_keeps_the_token_off_argv() {
+    let dir = fixture();
+    let token = "apiv3_info-secret-token";
+    let server = start_with(dir.path(), &["--info"], &[("INFLUXDB3_TOKEN", token)]);
+
+    let (status, body) = http(
+        server.port,
+        "/api/info?namespace=influxdb3&pod=db3-ingester-0&container=influxdb3",
+    );
+    assert_eq!(status, 200, "{body}");
+    let value: Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(value["enabled"], true);
+    assert_eq!(value["pod"], "db3-ingester-0");
+    assert_eq!(value["nodes"]["nodes"][0]["node_id"], "node-a");
+    assert_eq!(value["license"]["license_type"], "enterprise");
+    assert_eq!(value["errors"], serde_json::json!({}), "{body}");
+    assert!(
+        !body.contains(token),
+        "the admin token must never reach the payload"
+    );
+
+    // Both commands ran, in the pod the caller named, and the token stayed on stdin.
+    let calls = fs::read_to_string(dir.path().join("kubectl-calls")).unwrap();
+    assert!(
+        calls.contains("exec -i db3-ingester-0 -n influxdb3 -c influxdb3"),
+        "{calls}"
+    );
+    assert!(calls.contains("show nodes --format json"), "{calls}");
+    assert!(calls.contains("show license info --format json"), "{calls}");
+    assert!(
+        !calls.contains(token),
+        "the token must travel on stdin, never in argv: {calls}"
+    );
+}
+
+#[test]
+fn basic_information_reports_a_partial_failure_instead_of_a_silent_null() {
+    let dir = fixture();
+    // The license document comes back unparseable; the nodes view must survive it.
+    write_fixture(dir.path(), "info-license.json", "not json");
+    let server = start_with(dir.path(), &["--info"], &[("INFLUXDB3_TOKEN", "apiv3_t")]);
+
+    let (status, body) = http(
+        server.port,
+        "/api/info?namespace=influxdb3&pod=db3-ingester-0",
+    );
+    assert_eq!(status, 200, "{body}");
+    let value: Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(value["nodes"]["nodes"][0]["node_id"], "node-a");
+    assert_eq!(value["license"], Value::Null);
+    assert!(
+        value["errors"]["license-info"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("invalid JSON"),
+        "{body}"
+    );
+}
+
+#[test]
+fn basic_information_requires_an_admin_token() {
+    let dir = tempfile::tempdir().unwrap();
+    let output = env_command(dir.path())
+        .args(["webui", "--info", "--port", "0"])
+        .output()
+        .unwrap();
+    assert!(!output.status.success());
+    let combined = format!(
+        "{}{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(combined.contains("INFLUXDB3_TOKEN"), "{combined}");
 }

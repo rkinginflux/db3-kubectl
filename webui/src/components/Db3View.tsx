@@ -1,4 +1,5 @@
 import { Badge, Card, DataTable, Empty, Meter } from "./ui";
+import { BasicInformation } from "./BasicInformation";
 import type { Column } from "./ui";
 import { formatTime, relativeTime, roleOrder, shortImage } from "../format";
 import type { PodRow, Snapshot } from "../types";
@@ -223,6 +224,8 @@ export function Db3View({ snapshot }: { snapshot: Snapshot }) {
           emptyMessage="No InfluxDB 3 pods in scope"
         />
       </Card>
-    </>
-  );
-}
+
+      <BasicInformation snapshot={snapshot} />
+      </>
+    );
+  }

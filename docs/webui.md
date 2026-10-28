@@ -44,6 +44,7 @@ listening socket closes with the process, so nothing keeps serving.
 | `--no-secrets` | default behavior | Explicitly prohibit direct and Helm storage Secret reads; conflicts with both opt-ins. |
 | `--helm` | off | Explicitly allow Helm release collection. Releases are read from their storage Secrets through `kubectl`, so the `helm` binary is not required; this needs `get secrets` under your credentials and is independent of `--include-secret-metadata`. |
 | `--query` | off | Opt in to the read-only query terminal. Requires `INFLUXDB3_TOKEN` and `pods/exec` through your own kubeconfig. Accepts one `SELECT` or `SHOW` statement. |
+| `--info` | off | Opt in to the **Basic Information** panel: `influxdb3 show nodes --format json` and `influxdb3 show license info --format json` printed as pretty JSON. Requires `INFLUXDB3_TOKEN` and `pods/exec` through your own kubeconfig. |
 | `--manifest` | off | Print the read-only RBAC manifest and exit. |
 
 The browser can request a forced rebuild (`/api/snapshot?refresh=1`), but the
@@ -82,6 +83,36 @@ kubectl db3 webui --query
 - The `influxdb3` error text is returned so a failed query is diagnosable. This
   is the one place the WebUI forwards collector stderr; it is token-redacted and
   bounded at 64 KiB.
+
+## Basic Information panel
+
+The bottom of the **InfluxDB 3** view carries a **Basic Information** panel that
+prints two read-only views of the running database as pretty JSON:
+
+```sh
+influxdb3 show nodes --format json
+influxdb3 show license info --format json
+```
+
+These are the same two commands `kubectl db3 support info` runs, so the panel
+reads them the same way rather than adding a second integration: `kubectl exec
+-i POD -- sh -c <remote> db3-info <command>`, token on stdin, output split into
+`nodes` and `license`.
+
+Off by default. Without `--info` the section still renders, but it says the
+panel is off and names the flag; a panel that silently disappeared would read as
+a collection failure. With the flag:
+
+- the pod selector lists the collected database pods, ready ones first;
+- each command is fetched independently, so one failing does not blank the
+  other — the failure appears as a per-command banner and that block shows
+  `(no output)`;
+- output is redacted for known token patterns like every other path.
+
+There is no cache and no automatic refresh: the pod CLI round trip is explicit,
+one click at a time. The panel adds no Secret access; `pods/exec` is the same
+grant the query panel already needs, from your own kubeconfig, and the shipped
+RBAC manifest still grants no exec.
 
 ## What is collected
 
@@ -165,7 +196,7 @@ on screen and must be reviewed before it is pasted into a ticket.
 
 ## HTTP API
 
-The console preserves its five API endpoints plus the app shell (GET/HEAD;
+The console preserves its six API endpoints plus the app shell (GET/HEAD;
 other methods return 405). All API requests, including health and manifest,
 require `X-DB3-Session`. A cryptorandom 256-bit per-run session is bootstrapped
 in the app shell's `db3-session` meta tag, never in a URL or terminal log.
@@ -181,6 +212,7 @@ multi-user authentication system: another local process can fetch the shell.
 | `/api/health` | `{"ok":true,"version":"…"}` |
 | `/api/snapshot[?refresh=1]` | The whole environment snapshot. |
 | `/api/logs?namespace=&pod=&container=&tail=` | Bounded log tail, token-redacted. |
+| `/api/info?namespace=&pod=&container=` | `influxdb3 show nodes` and `show license info` from that pod. 403 unless `--info` was passed. |
 | `/api/query?namespace=&pod=&container=&database=&language=&q=` | One read-only statement. 403 unless `--query` was passed. |
 | `/api/manifest` | The RBAC manifest as `text/yaml`. |
 

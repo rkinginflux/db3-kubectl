@@ -253,6 +253,7 @@ export interface Snapshot {
   };
   helm: HelmReleaseRow[];
   helm_enabled?: boolean;
+  info_enabled?: boolean;
   configmaps: ConfigMapRow[];
   secrets: SecretRow[];
   secret_values_exposed: boolean;
@@ -271,6 +272,21 @@ export interface LogsResponse {
   redacted: boolean;
   error: string | null;
   lines: string;
+}
+
+/**
+ * `influxdb3 show nodes` and `show license info`, read in a pod. Each value is
+ * whatever the CLI printed, or null when that command failed; `errors` carries
+ * the per-command diagnostic so a partial result is visibly partial.
+ */
+export interface InfoResponse {
+  enabled: boolean;
+  namespace: string;
+  pod: string;
+  container: string | null;
+  nodes: unknown;
+  license: unknown;
+  errors: Record<string, string>;
 }
 
 export interface QueryResponse {

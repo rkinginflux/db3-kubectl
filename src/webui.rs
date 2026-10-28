@@ -53,6 +53,10 @@ pub struct Webui {
     /// Opt in to the read-only query terminal (needs INFLUXDB3_TOKEN and pods/exec)
     #[arg(long)]
     query: bool,
+    /// Opt in to the Basic Information panel (runs `influxdb3 show nodes` and
+    /// `show license info` in a database pod; needs INFLUXDB3_TOKEN and pods/exec)
+    #[arg(long)]
+    info: bool,
 }
 
 struct Cache {
@@ -75,6 +79,9 @@ struct State {
     pin_authority: bool,
     nonce: String,
     query_enabled: bool,
+    /// True when the console was started with `--info`, which is the only path
+    /// that reads `influxdb3 show nodes` / `show license info` from a pod.
+    info_enabled: bool,
     stop: Arc<AtomicBool>,
 }
 
@@ -94,6 +101,9 @@ pub fn run(args: Webui) -> Result<(), Box<dyn std::error::Error>> {
     let token = std::env::var("INFLUXDB3_TOKEN").unwrap_or_default();
     if args.query && token.trim().is_empty() {
         return Err("--query requires INFLUXDB3_TOKEN in the environment".into());
+    }
+    if args.info && token.trim().is_empty() {
+        return Err("--info requires INFLUXDB3_TOKEN in the environment".into());
     }
     let bind = format!("{}:{}", bind_host(&args.address), args.port);
     let listener = TcpListener::bind(&bind).map_err(|error| {
@@ -162,6 +172,7 @@ pub fn run(args: Webui) -> Result<(), Box<dyn std::error::Error>> {
             timeout: args.timeout,
             no_secrets: !args.include_secret_metadata || args.no_secrets,
             helm: args.helm,
+            info: args.info,
             stop: Arc::clone(&stop),
         },
         cache_seconds: args.refresh,
@@ -172,6 +183,7 @@ pub fn run(args: Webui) -> Result<(), Box<dyn std::error::Error>> {
         timeout: args.timeout,
         token,
         query_enabled: args.query,
+        info_enabled: args.info,
         stop: Arc::clone(&stop),
         session: random_hex()?,
         nonce: random_hex()?,
@@ -357,6 +369,19 @@ fn handle(state: &State, request: Request) {
             }
             Err(error) => respond(request, api(json!({"error": error}).to_string(), 400)),
         },
+        "/api/info" => match run_info(state, query) {
+            Ok(value) => {
+                let body = if head {
+                    String::new()
+                } else {
+                    value.to_string()
+                };
+                respond(request, api(body, 200));
+            }
+            Err((status, error)) => {
+                respond(request, api(json!({"error": error}).to_string(), status))
+            }
+        },
         "/api/query" => match run_query(state, query) {
             Ok(value) => {
                 let body = if head {
@@ -539,6 +564,108 @@ fn logs(state: &State, query: &str) -> Result<Value, String> {
 const MAX_STATEMENT: usize = 2048;
 /// Rows handed to the browser; the process output is separately capped at 4 MiB.
 const MAX_ROWS: usize = 1000;
+
+/// The two read-only views that `kubectl db3 support info` prints, surfaced for
+/// the Basic Information panel. Both run in the selected pod through the same
+/// exec helper the query panel uses, so the posture does not move: `--info` is
+/// required, `pods/exec` comes from the operator's own kubeconfig, and the token
+/// travels on stdin rather than in argv.
+fn run_info(state: &State, query: &str) -> Result<Value, (u16, String)> {
+    if !state.info_enabled {
+        return Err((
+            403,
+            "the Basic Information panel is disabled; restart the console with --info to enable it"
+                .to_owned(),
+        ));
+    }
+    let namespace = param(query, "namespace").unwrap_or_else(|| "default".to_owned());
+    let pod = param(query, "pod").ok_or((400, "pod is required".to_owned()))?;
+    let container = param(query, "container").filter(|value| !value.is_empty());
+
+    for (label, value) in [
+        ("namespace", Some(&namespace)),
+        ("pod", Some(&pod)),
+        ("container", container.as_ref()),
+    ] {
+        if let Some(value) = value {
+            if !valid_name(value) {
+                return Err((400, format!("invalid {label} name")));
+            }
+        }
+    }
+
+    let mut base = Vec::new();
+    if let Some(context) = state
+        .options
+        .context
+        .as_deref()
+        .filter(|value| !value.is_empty())
+    {
+        base.push("--context".to_owned());
+        base.push(context.to_owned());
+    }
+    base.extend(["exec", "-i", pod.as_str(), "-n", namespace.as_str()].map(str::to_owned));
+    if let Some(container) = container.as_ref() {
+        base.push("-c".to_owned());
+        base.push(container.clone());
+    }
+    base.extend(["--", "sh", "-c", crate::REMOTE, "db3-info"].map(str::to_owned));
+
+    let mut nodes = Value::Null;
+    let mut license = Value::Null;
+    let mut errors = serde_json::Map::new();
+
+    for (name, command) in crate::COMMANDS
+        .iter()
+        .filter(|(name, _)| matches!(*name, "nodes" | "license-info"))
+    {
+        let argv: Vec<String> = base
+            .iter()
+            .map(String::as_str)
+            .chain(command.iter().copied())
+            .map(str::to_owned)
+            .collect();
+        let captured = crate::webui_process::capture_exec(
+            "kubectl",
+            &argv,
+            &format!("{}\n", state.token),
+            state.timeout,
+            &state.stop,
+        )
+        .map_err(|error| (500, format!("could not run kubectl: {error}")))?;
+
+        let stdout = crate::redact(&captured.stdout, &state.token);
+        let stderr = crate::redact(captured.stderr.trim(), &state.token);
+        let parsed = serde_json::from_str::<Value>(stdout.trim()).ok();
+        if let Some(error) = captured.error.clone().or_else(|| {
+            parsed
+                .is_none()
+                .then(|| "command returned invalid JSON".to_owned())
+        }) {
+            let detail = if stderr.is_empty() {
+                error
+            } else {
+                format!("{error}: {stderr}")
+            };
+            errors.insert((*name).to_owned(), json!(detail));
+        }
+        match *name {
+            "nodes" => nodes = parsed.unwrap_or(Value::Null),
+            "license-info" => license = parsed.unwrap_or(Value::Null),
+            _ => {}
+        }
+    }
+
+    Ok(json!({
+        "enabled": true,
+        "namespace": namespace,
+        "pod": pod,
+        "container": container,
+        "nodes": nodes,
+        "license": license,
+        "errors": Value::Object(errors),
+    }))
+}
 
 fn run_query(state: &State, query: &str) -> Result<Value, (u16, String)> {
     if !state.query_enabled {
