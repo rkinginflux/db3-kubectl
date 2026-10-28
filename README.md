@@ -257,7 +257,10 @@ never grants Secret reads.
 *Logs view. A bounded read of one pod's log through the Kubernetes API, with the
 container, line limit, and pause controls selectable and a copy-to-clipboard
 action. Known exported admin tokens are replaced with a `token redacted` marker
-in the returned text.*
+in the returned text. A **Copy for support** action packages the visible logs
+with a short triage header and links to InfluxData's support portal
+(<https://support.influxdata.com>) for customers who need to open or update a
+ticket; nothing is uploaded by the console.*
 
 The UI is a React single-page app embedded in the binary (no Node runtime and no
 network fetch at run time). Dark is the default theme; the header toggle (or `t`)

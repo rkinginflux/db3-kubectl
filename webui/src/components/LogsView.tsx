@@ -1,5 +1,6 @@
 import { useMemo, useState } from "react";
 import { Badge, Card, CopyButton, Empty } from "./ui";
+import { SupportHandoff } from "./SupportHandoff";
 import { fetchLogs } from "../api";
 import type { LogsResponse, Snapshot } from "../types";
 
@@ -101,6 +102,14 @@ export function LogsView({ snapshot }: { snapshot: Snapshot }) {
                 {result.redacted && <Badge tone="warn">token redacted</Badge>}
               </div>
               <pre className="logs">{result.lines || "(no log output)"}</pre>
+              <SupportHandoff
+                snapshot={snapshot}
+                pod={result.pod}
+                container={result.container}
+                tail={result.tail}
+                logs={result.lines}
+                redacted={result.redacted}
+              />
             </>
           ) : (
             <Empty glyph="≋">Choose a pod and fetch its most recent log lines.</Empty>
