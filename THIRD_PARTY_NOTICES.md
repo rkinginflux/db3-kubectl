@@ -45,6 +45,24 @@ The build toolchain (Vite, TypeScript, `vite-plugin-singlefile`, type packages)
 runs only at development time and is not part of the distributed binary or
 bundle.
 
+### Kubernetes icon — Linux Foundation trademark usage guidelines
+
+The console favicon is the Kubernetes icon from the CNCF artwork repository.
+
+- Source: `https://github.com/cncf/artwork/blob/main/projects/kubernetes/icon/color/kubernetes-icon-color.svg`
+- Embedded verbatim, unmodified, as a base64 `data:` URI in `webui/index.html`
+- Terms: that repository makes its artwork available under the
+  [Linux Foundation trademark usage guidelines](https://www.linuxfoundation.org/trademark-usage/),
+  not an open-source license
+
+The mark identifies the technology this plugin operates on. It is not a claim of
+certification or of compatibility testing, and it does not imply that The Linux
+Foundation, the CNCF, or the Kubernetes project sponsors or endorses this
+project. Kubernetes is a registered trademark of The Linux Foundation.
+
+This is artwork, not software: no source code is derived from it, so no license
+obligation beyond the usage guidelines above attaches to the binary.
+
 ## Statically linked Rust crates
 
 The binary links the Rust crates resolved in `Cargo.lock`. At the time of

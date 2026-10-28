@@ -9,9 +9,13 @@ These project-copy changes are based on the published [Guidelines for Using Infl
 - **Proper Use — Adjectives and Titles:** keep `db3-kubectl` as the project title and use the database name descriptively, modifying a generic noun such as "database."
 - **Proper Use — Trademark Symbol:** use the registered symbol with the protected word mark in descriptive prose.
 - **Proper Use — Attribution/Disclaimer:** display ownership and non-endorsement attribution in the README footnote and root CLI help, not only in this document.
-- **Improper Use — Implied Affiliation; Logos:** do not present this project as official, endorsed, certified, or sponsored, and do not add vendor logos or brand artwork without the required written license.
+- **Improper Use — Implied Affiliation; Logos:** do not present this project as official, endorsed, certified, or sponsored, and do not add vendor logos or brand artwork without the required written license. One exception is recorded below and in [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).
 
 The source was read through a Jina Reader rendering of the supplied URL after direct access was blocked. This is a scoped implementation review, not a legal opinion or confirmation that every use is permitted.
+
+## Recorded exceptions
+
+- **Kubernetes favicon.** The console favicon is the Kubernetes icon, taken unmodified from the CNCF artwork repository and used as an interoperability reference under the Linux Foundation trademark usage guidelines. This was an owner decision that knowingly sets aside the "required written license" condition in *Improper Use — Implied Affiliation; Logos* above; the non-endorsement requirement in that bullet still applies, and the icon is attributed in [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md). Revert `webui/index.html` to restore the previous mark if this exception is withdrawn.
 
 ## Contributor guidance
 
