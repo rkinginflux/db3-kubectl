@@ -264,6 +264,122 @@ fn start(dir: &Path, extra: &[&str]) -> Server {
     start_with(dir, extra, &[])
 }
 
+fn telemetry_fixture(dir: &Path, code: &str) -> std::path::PathBuf {
+    let token = "telemetry_fixture_token_not_for_real_use_123456";
+    let path = dir.join("telemetry-access.json");
+    fs::write(
+        &path,
+        serde_json::json!({"token":token,"auth_type":"bearer", "port":9091,
+        "expires_at_unix":9999999999u64})
+        .to_string(),
+    )
+    .unwrap();
+    fs::set_permissions(&path, fs::Permissions::from_mode(0o600)).unwrap();
+    script(
+        dir,
+        "curl",
+        &format!(
+            r#"#!/bin/sh
+DIR="$(dirname "$0")"
+printf '%s\n' "$*" >> "$DIR/curl-args"
+cat > "$DIR/curl-stdin"
+cat "$DIR/telemetry-body.json"
+printf '\n{code}'
+"#
+        ),
+    );
+    write_fixture(
+        dir,
+        "telemetry-body.json",
+        &serde_json::json!({"schema_version":"1.0",
+        "config":{"context":"lab","namespace":"influxdb3"},"echo":token})
+        .to_string(),
+    );
+    path
+}
+
+#[test]
+fn telemetry_is_opt_in_and_requires_the_console_session() {
+    let dir = fixture();
+    let server = start(dir.path(), &[]);
+    assert_eq!(http(server.port, "/api/telemetry").0, 403);
+    let host = format!("Host: 127.0.0.1:{}\r\n", server.port);
+    assert_eq!(raw_http(server.port, "/api/telemetry", &host).0, 401);
+}
+
+#[test]
+fn telemetry_keeps_credential_on_stdin_and_redacts_response_echoes() {
+    let dir = fixture();
+    let path = telemetry_fixture(dir.path(), "200");
+    let server = start(
+        dir.path(),
+        &[
+            "--telemetry-access",
+            path.to_str().unwrap(),
+            "--context",
+            "lab",
+            "-n",
+            "influxdb3",
+        ],
+    );
+    let (status, body) = http(server.port, "/api/telemetry");
+    assert_eq!(status, 200);
+    let token = "telemetry_fixture_token_not_for_real_use_123456";
+    assert!(!body.contains(token));
+    assert!(
+        !fs::read_to_string(dir.path().join("curl-args"))
+            .unwrap()
+            .contains(token)
+    );
+    assert!(
+        fs::read_to_string(dir.path().join("curl-stdin"))
+            .unwrap()
+            .contains(token)
+    );
+    assert!(!dir.path().join("kubectl-calls").exists());
+    let args = fs::read_to_string(dir.path().join("curl-args")).unwrap();
+    assert!(args.contains("http://127.0.0.1:9091/v1/snapshot"));
+    assert!(args.contains("--noproxy *"));
+    assert!(!args.contains("--location"));
+}
+
+#[test]
+fn telemetry_rejects_target_mismatch_and_unknown_history_arguments() {
+    let dir = fixture();
+    let path = telemetry_fixture(dir.path(), "200");
+    let server = start(
+        dir.path(),
+        &[
+            "--telemetry-access",
+            path.to_str().unwrap(),
+            "--context",
+            "other",
+        ],
+    );
+    assert_eq!(http(server.port, "/api/telemetry").0, 409);
+    for url in [
+        "/api/telemetry?namespace=other",
+        "/api/telemetry/history?metric=up&start=1&end=300&step=0",
+        "/api/telemetry/history?metric=up%26url%3Devil&start=1&end=300&step=30",
+        "/api/telemetry/history?metric=up&start=1&end=300&step=30&query=anything",
+    ] {
+        assert_eq!(http(server.port, url).0, 400, "{url}");
+    }
+}
+
+#[test]
+fn telemetry_propagates_busy_status_without_upstream_error_details() {
+    let dir = fixture();
+    let path = telemetry_fixture(dir.path(), "429");
+    let server = start(dir.path(), &["--telemetry-access", path.to_str().unwrap()]);
+    let (status, body) = http(
+        server.port,
+        "/api/telemetry/history?metric=compactor_plans_active&start=1&end=300&step=30",
+    );
+    assert_eq!(status, 429);
+    assert!(!body.contains("telemetry_fixture_token"));
+}
+
 fn http(port: u16, path: &str) -> (u16, String) {
     let host = format!("Host: 127.0.0.1:{port}\r\n");
     let (_, page) = raw_http(port, "/", &host);
@@ -285,13 +401,19 @@ fn http(port: u16, path: &str) -> (u16, String) {
     .unwrap();
     let mut raw = Vec::new();
     stream.read_to_end(&mut raw).unwrap();
+    let (status, _, body) = decoded_response(&raw);
+    (status, body)
+}
+
+fn decoded_response(raw: &[u8]) -> (u16, String, String) {
     let split = raw.windows(4).position(|w| w == b"\r\n\r\n").unwrap();
     let headers = std::str::from_utf8(&raw[..split]).unwrap();
     let status = headers.split_whitespace().nth(1).unwrap().parse().unwrap();
     let mut bytes = raw[split + 4..].to_vec();
-    if headers
-        .to_lowercase()
-        .contains("transfer-encoding: chunked")
+    if !bytes.is_empty()
+        && headers
+            .to_lowercase()
+            .contains("transfer-encoding: chunked")
     {
         let mut rest = bytes.as_slice();
         let mut decoded = Vec::new();
@@ -309,7 +431,15 @@ fn http(port: u16, path: &str) -> (u16, String) {
         bytes = decoded;
     }
     let body = String::from_utf8(bytes).unwrap();
-    (status, body)
+    (status, headers.to_string(), body)
+}
+
+#[test]
+fn chunk_boundaries_can_split_utf8_characters() {
+    let raw = b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n1\r\n\xe2\r\n2\r\n\x80\x94\r\n0\r\n\r\n";
+    let (status, _, body) = decoded_response(raw);
+    assert_eq!(status, 200);
+    assert_eq!(body, "\u{2014}");
 }
 
 /// Wait until `pid` has exited (gone from /proc) or is a zombie, up to `grace`.
@@ -346,9 +476,10 @@ fn raw_method(port: u16, method: &str, path: &str, headers: &str) -> (u16, Strin
         "{method} {path} HTTP/1.1\r\n{headers}Connection: close\r\n\r\n"
     )
     .unwrap();
-    let mut raw = String::new();
-    stream.read_to_string(&mut raw).unwrap();
-    (raw.split_whitespace().nth(1).unwrap().parse().unwrap(), raw)
+    let mut raw = Vec::new();
+    stream.read_to_end(&mut raw).unwrap();
+    let (status, headers, body) = decoded_response(&raw);
+    (status, format!("{headers}\r\n\r\n{body}"))
 }
 
 #[test]

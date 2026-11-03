@@ -57,6 +57,9 @@ pub struct Webui {
     /// `show license info` in a database pod; needs INFLUXDB3_TOKEN and pods/exec)
     #[arg(long)]
     info: bool,
+    /// Owner-only telemetry credential JSON; enables the read-only Telemetry panel
+    #[arg(long)]
+    telemetry_access: Option<std::path::PathBuf>,
 }
 
 struct Cache {
@@ -82,6 +85,7 @@ struct State {
     /// True when the console was started with `--info`, which is the only path
     /// that reads `influxdb3 show nodes` / `show license info` from a pod.
     info_enabled: bool,
+    telemetry: Option<crate::telemetry::Access>,
     stop: Arc<AtomicBool>,
 }
 
@@ -99,6 +103,14 @@ pub fn run(args: Webui) -> Result<(), Box<dyn std::error::Error>> {
     }
 
     let token = std::env::var("INFLUXDB3_TOKEN").unwrap_or_default();
+    let telemetry = args
+        .telemetry_access
+        .as_deref()
+        .map(crate::telemetry::Access::load)
+        .transpose()?;
+    if telemetry.is_some() && !is_loopback(&args.address) {
+        return Err("telemetry is restricted to a loopback console".into());
+    }
     if args.query && token.trim().is_empty() {
         return Err("--query requires INFLUXDB3_TOKEN in the environment".into());
     }
@@ -184,6 +196,7 @@ pub fn run(args: Webui) -> Result<(), Box<dyn std::error::Error>> {
         token,
         query_enabled: args.query,
         info_enabled: args.info,
+        telemetry,
         stop: Arc::clone(&stop),
         session: random_hex()?,
         nonce: random_hex()?,
@@ -382,6 +395,54 @@ fn handle(state: &State, request: Request) {
                 respond(request, api(json!({"error": error}).to_string(), status))
             }
         },
+        "/api/telemetry" | "/api/telemetry/history" => {
+            let Some(access) = state.telemetry.as_ref() else {
+                return respond(
+                    request,
+                    api(json!({"error":"telemetry not configured"}).to_string(), 403),
+                );
+            };
+            let result = if path == "/api/telemetry/history" {
+                telemetry_history_parameters(query).and_then(|(metric, start, end, step)| {
+                    access
+                        .fetch(None, &state.stop)
+                        .and_then(|snapshot| validate_telemetry_target(state, &snapshot))
+                        .and_then(|()| access.fetch(Some((&metric, start, end, step)), &state.stop))
+                })
+            } else if !query.is_empty() {
+                Err((400, "telemetry snapshot takes no parameters".to_owned()))
+            } else {
+                access.fetch(None, &state.stop)
+            };
+            match result {
+                Ok(value) => {
+                    let identity = if path == "/api/telemetry/history" {
+                        Ok(())
+                    } else {
+                        validate_telemetry_target(state, &value)
+                    };
+                    match identity {
+                        Err((code, message)) => {
+                            respond(request, api(json!({"error":message}).to_string(), code))
+                        }
+                        Ok(()) => respond(
+                            request,
+                            api(
+                                if head {
+                                    String::new()
+                                } else {
+                                    value.to_string()
+                                },
+                                200,
+                            ),
+                        ),
+                    }
+                }
+                Err((status, message)) => {
+                    respond(request, api(json!({"error":message}).to_string(), status))
+                }
+            }
+        }
         "/api/query" => match run_query(state, query) {
             Ok(value) => {
                 let body = if head {
@@ -490,6 +551,58 @@ fn snapshot(state: &State, force: bool) -> Result<String, String> {
     cache.at = Some(Instant::now());
     cache.body = Some(body.clone());
     Ok(body)
+}
+
+fn telemetry_history_parameters(query: &str) -> Result<(String, f64, f64, f64), (u16, String)> {
+    let entries: Vec<&str> = query.split('&').collect();
+    if entries.len() != 4
+        || ["metric", "start", "end", "step"].iter().any(|key| {
+            entries
+                .iter()
+                .filter(|part| part.starts_with(&format!("{key}=")))
+                .count()
+                != 1
+        })
+    {
+        return Err((400, "history requires metric, start, end and step".into()));
+    }
+    let get = |name| param(query, name).ok_or((400, "history parameter missing".to_owned()));
+    let metric = get("metric")?;
+    let number = |name| {
+        get(name)?
+            .parse::<f64>()
+            .map_err(|_| (400, "invalid history range".to_owned()))
+    };
+    let (start, end, step) = (number("start")?, number("end")?, number("step")?);
+    if !crate::telemetry::valid_metric(&metric) || !crate::telemetry::valid_range(start, end, step)
+    {
+        return Err((400, "invalid telemetry history range".into()));
+    }
+    Ok((metric, start, end, step))
+}
+
+fn validate_telemetry_target(state: &State, value: &Value) -> Result<(), (u16, String)> {
+    let config = &value["config"];
+    if config.is_null() && (state.options.context.is_some() || state.options.namespace.is_some()) {
+        return Err((503, "telemetry target identity unavailable".into()));
+    }
+    if state
+        .options
+        .context
+        .as_ref()
+        .is_some_and(|v| config["context"].as_str() != Some(v.as_str()))
+        || state
+            .options
+            .namespace
+            .as_ref()
+            .is_some_and(|v| config["namespace"].as_str() != Some(v.as_str()))
+    {
+        return Err((
+            409,
+            "telemetry target does not match console context or namespace".into(),
+        ));
+    }
+    Ok(())
 }
 
 fn logs(state: &State, query: &str) -> Result<Value, String> {

@@ -11,7 +11,12 @@ export default defineConfig({
     transformIndexHtml: {
       order: "post",
       handler: (html) => {
-        const legal = ["LICENSE.md", "THIRD_PARTY_NOTICES.md"].map(name => readFileSync(new URL(`../${name}`, import.meta.url), "utf8")).join("\n\n");
+        const legal = ["LICENSE.md", "THIRD_PARTY_NOTICES.md",
+          "webui/node_modules/lucide-react/LICENSE", "webui/node_modules/echarts/LICENSE",
+          "webui/node_modules/echarts/NOTICE", "webui/node_modules/echarts/licenses/LICENSE-d3",
+          "webui/node_modules/zrender/LICENSE", "webui/node_modules/tslib/LICENSE.txt",
+          "webui/node_modules/tslib/CopyrightNotice.txt"]
+          .map(name => readFileSync(new URL(`../${name}`, import.meta.url), "utf8")).join("\n\n");
         const escaped = legal.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
         return html.replace("</body>", `<template id="db3-third-party-notices"><pre>${escaped}</pre></template></body>`);
       },

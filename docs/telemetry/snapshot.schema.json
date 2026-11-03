@@ -1,0 +1,143 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:influxdb3:cluster-telemetry:snapshot:1.0",
+  "title": "Cluster Telemetry Snapshot Envelope 1.0",
+  "type": "object",
+  "required": ["schema_version", "served_at", "instance_id", "status", "collection_errors"],
+  "additionalProperties": false,
+  "properties": {
+    "schema_version": {"const": "1.0"},
+    "served_at": {"type": "string", "format": "date-time"},
+    "instance_id": {"type": "string"},
+    "status": {"enum": ["ok", "partial"]},
+    "collection_errors": {"type": "object"},
+    "config": {"anyOf": [{"type": "null"}, {"$ref": "#/$defs/config"}]},
+    "metrics": {"anyOf": [{"type": "null"}, {"$ref": "#/$defs/metrics"}]}
+  },
+  "$defs": {
+    "setting": {
+      "type": "object",
+      "required": ["option", "value", "source", "state", "container_environment", "declared_environment", "cli_option_supported", "documented_default", "recognized_environment_names", "configmap_or_spec_drift"],
+      "properties": {
+        "option": {"type": "string"},
+        "value": {"type": ["string", "null"]},
+        "source": {"type": "string"},
+        "state": {"enum": ["observed", "unknown_or_suppressed"]},
+        "container_environment": {"type": "array", "items": {"type": "object"}},
+        "declared_environment": {"type": "array", "items": {"type": "object"}},
+        "cli_option_supported": {"type": ["boolean", "null"]},
+        "documented_default": {"type": ["string", "null"]},
+        "recognized_environment_names": {"type": ["array", "null"], "items": {"type": "string"}},
+        "configmap_or_spec_drift": {"type": ["boolean", "null"]}
+      },
+      "additionalProperties": false
+    },
+    "pod": {
+      "type": "object",
+      "required": ["pod", "pod_uid", "container", "image", "resources", "startup_environment_observed", "settings"],
+      "properties": {
+        "pod": {"type": "string"},
+        "pod_uid": {"type": "string"},
+        "container": {"const": "influxdb3"},
+        "image": {"type": ["string", "null"]},
+        "resources": {"type": "object"},
+        "startup_environment_observed": {"type": "boolean"},
+        "settings": {"type": "array", "items": {"$ref": "#/$defs/setting"}}
+      }
+    },
+    "config": {
+      "type": "object",
+      "required": ["schema_version", "observed_at", "max_age_seconds", "fresh", "age_seconds", "context", "namespace", "release", "cluster_ids", "snapshot_id", "status", "errors", "nodes", "pods", "limitations"],
+      "properties": {
+        "schema_version": {"const": "1.0"},
+        "observed_at": {"type": "string", "format": "date-time"},
+        "max_age_seconds": {"type": "integer"},
+        "fresh": {"type": "boolean"},
+        "age_seconds": {"type": "number"},
+        "context": {"type": "string"},
+        "namespace": {"type": "string"},
+        "release": {"type": "string"},
+        "cluster_ids": {"type": "array", "items": {"type": "string"}},
+        "snapshot_id": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+        "status": {"enum": ["ok", "partial", "stale"]},
+        "errors": {"type": "array", "items": {"type": "string"}},
+        "nodes": {"type": "array", "items": {"type": "object"}},
+        "pods": {"type": "array", "items": {"$ref": "#/$defs/pod"}},
+        "limitations": {"type": "array", "items": {"type": "string"}}
+      },
+      "additionalProperties": false
+    },
+    "sample": {
+      "type": "object",
+      "required": ["labels", "evaluated_at", "value"],
+      "properties": {
+        "labels": {"type": "object", "additionalProperties": {"type": "string"}},
+        "evaluated_at": {"type": "string", "format": "date-time"},
+        "value": {"type": ["number", "null"]}
+      },
+      "additionalProperties": false
+    },
+    "termination": {
+      "type": ["object", "null"],
+      "properties": {
+        "reason": {"type": ["string", "null"]},
+        "oom_killed": {"type": "boolean"},
+        "exit_code": {"type": ["integer", "null"]},
+        "signal": {"type": ["integer", "null"]},
+        "started_at": {"type": ["string", "null"]},
+        "finished_at": {"type": ["string", "null"]}
+      },
+      "additionalProperties": false
+    },
+    "containerHealth": {
+      "type": "object",
+      "required": ["observed_at", "status", "pods"],
+      "properties": {
+        "observed_at": {"type": "string", "format": "date-time"},
+        "status": {"enum": ["ok", "no_data", "unavailable"]},
+        "pods": {"type": "array", "items": {
+          "type": "object",
+          "required": ["pod", "pod_uid", "container", "container_id", "ready", "restarts", "current_state", "last_termination", "current_termination"],
+          "properties": {
+            "pod": {"type": "string"}, "pod_uid": {"type": "string"},
+            "container": {"type": "string"}, "container_id": {"type": ["string", "null"]},
+            "ready": {"type": "boolean"}, "restarts": {"type": "integer"},
+            "current_state": {"enum": ["running", "waiting", "terminated", "unknown"]},
+            "last_termination": {"$ref": "#/$defs/termination"},
+            "current_termination": {"$ref": "#/$defs/termination"}
+          },
+          "additionalProperties": false
+        }}
+      },
+      "additionalProperties": false
+    },
+    "metric": {
+      "type": "object",
+      "required": ["id", "unit", "status", "samples"],
+      "properties": {
+        "id": {"type": "string"},
+        "unit": {"type": "string"},
+        "status": {"enum": ["ok", "partial", "no_data", "unavailable", "non_finite", "stale", "source_unhealthy", "source_unavailable", "stale_scan"]},
+        "samples": {"type": "array", "items": {"$ref": "#/$defs/sample"}},
+        "prometheus_annotations_present": {"type": "boolean"}
+      },
+      "additionalProperties": false
+    },
+    "metrics": {
+      "type": "object",
+      "required": ["schema_version", "observed_at", "max_age_seconds", "fresh", "age_seconds", "status", "sources", "metrics"],
+      "properties": {
+        "schema_version": {"const": "1.0"},
+        "observed_at": {"type": "string", "format": "date-time"},
+        "max_age_seconds": {"type": "integer"},
+        "fresh": {"type": "boolean"},
+        "age_seconds": {"type": "number"},
+        "status": {"enum": ["ok", "partial", "stale"]},
+        "sources": {"type": "array", "items": {"type": "object"}},
+        "container_health": {"$ref": "#/$defs/containerHealth"},
+        "metrics": {"type": "array", "items": {"$ref": "#/$defs/metric"}}
+      },
+      "additionalProperties": false
+    }
+  }
+}

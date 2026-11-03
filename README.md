@@ -277,6 +277,26 @@ switches to light and remembers the choice. `r` refreshes, and routes are hashes
 such as `#topology`. See [docs/webui.md](docs/webui.md) for the API, the full
 collector list, role detection rules, threat model, and troubleshooting.
 
+### Performance Telemetry
+
+An optional Telemetry view shows performance history, execution memory and OOM
+counters, container exits, compaction pressure, and allowlisted running startup
+settings. It consumes a separately deployed contract-1.0 telemetry provider;
+it does not install a collector or Prometheus, change Kubernetes RBAC, or write
+measurements to the target InfluxDB instance. Curl is required for this opt-in
+integration. The provider credential stays in the native server, not the browser.
+
+```sh
+kubectl db3 webui --context lab -n influxdb3 --port 9193 \
+  --telemetry-access /private/path/telemetry-access.json
+```
+
+The provider must be reachable at `127.0.0.1:9091`; the console must bind to
+loopback. See [the telemetry contract and integration guide](docs/telemetry.md)
+for provider dependencies, setup, bounded-history limits, migration use cases,
+and the distinction between execution allocation failure and Kubernetes OOM kills.
+This view provides observations, not automatic migration throttling.
+
 ## Tests
 
 ```sh

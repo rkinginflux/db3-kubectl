@@ -1,4 +1,5 @@
 import type { InfoResponse, LogsResponse, QueryResponse, Snapshot } from "./types";
+import type { TelemetryHistory, TelemetrySnapshot } from "./telemetry";
 
 export interface SnapshotParams {
   namespace: string | null;
@@ -14,9 +15,24 @@ function request(path: string): Promise<Response> {
 async function json<T>(response: Response): Promise<T> {
   if (!response.ok) {
     const text = await response.text();
-    throw new Error(text.trim() || `HTTP ${response.status}`);
+    let message = text.trim() || `HTTP ${response.status}`;
+    try { message = JSON.parse(text).error ?? message; } catch { /* plain-text errors remain readable */ }
+    throw Object.assign(new Error(message), { status: response.status });
   }
   return (await response.json()) as T;
+}
+
+export async function fetchTelemetry(): Promise<TelemetrySnapshot> {
+  const result = await json<TelemetrySnapshot>(await request("/api/telemetry"));
+  if (result.schema_version !== "1.0") throw new Error("Unsupported telemetry contract");
+  return result;
+}
+
+export async function fetchTelemetryHistory(metric: string, seconds: number): Promise<TelemetryHistory> {
+  const end = Math.floor(Date.now() / 1000);
+  const search = new URLSearchParams({ metric, start: String(end - seconds), end: String(end),
+    step: String(seconds <= 3600 ? 30 : seconds <= 21600 ? 120 : 600) });
+  return json<TelemetryHistory>(await request(`/api/telemetry/history?${search}`));
 }
 
 export async function fetchSnapshot(params: SnapshotParams): Promise<Snapshot> {
