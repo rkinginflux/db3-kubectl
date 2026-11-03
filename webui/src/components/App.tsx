@@ -11,14 +11,17 @@ import { LogsView } from "./LogsView";
 import { Overview } from "./Overview";
 import { QueryView } from "./QueryView";
 import { Topology } from "./Topology";
+import { TelemetryView } from "./TelemetryView";
+import { Activity } from "lucide-react";
+import type { ReactNode } from "react";
 import type { Snapshot } from "../types";
 
-type ViewKey = "overview" | "topology" | "db3" | "kubernetes" | "helm" | "config" | "events" | "logs" | "query";
+type ViewKey = "overview" | "topology" | "db3" | "kubernetes" | "helm" | "config" | "events" | "logs" | "query" | "telemetry";
 
 interface NavItem {
   key: ViewKey;
   label: string;
-  icon: string;
+  icon: ReactNode;
   group: string;
 }
 
@@ -27,6 +30,7 @@ const NAV: NavItem[] = [
   { key: "topology", label: "Topology", icon: "⬡", group: "Environment" },
   { key: "db3", label: "InfluxDB 3", icon: "◍", group: "Environment" },
   { key: "kubernetes", label: "Kubernetes", icon: "☸", group: "Environment" },
+  { key: "telemetry", label: "Telemetry", icon: <Activity size={17} />, group: "Environment" },
   { key: "helm", label: "Helm", icon: "⎈", group: "Configuration" },
   { key: "config", label: "Config & secrets", icon: "▤", group: "Configuration" },
   { key: "events", label: "Events", icon: "◔", group: "Operations" },
@@ -39,6 +43,7 @@ const TITLES: Record<ViewKey, { title: string; subtitle: string }> = {
   topology: { title: "Topology", subtitle: "What each node runs, with kube-system omitted" },
   db3: { title: "InfluxDB 3", subtitle: "Clusters, roles, pods and licensing" },
   kubernetes: { title: "Kubernetes", subtitle: "Nodes, workloads, services, storage and policies" },
+  telemetry: { title: "Telemetry", subtitle: "Cluster performance, compaction and observed startup settings" },
   helm: { title: "Helm", subtitle: "Releases, chart pins and revision state" },
   config: { title: "Config & secrets", subtitle: "ConfigMaps, opt-in Secret metadata, and masked container environment" },
   events: { title: "Events", subtitle: "Recent warnings and lifecycle messages" },
@@ -58,6 +63,7 @@ export function App() {
   const [refreshing, setRefreshing] = useState(false);
   const [intervalSeconds, setIntervalSeconds] = useState(30);
   const [navOpen, setNavOpen] = useState(false);
+  const [telemetryRefresh, setTelemetryRefresh] = useState(0);
   const inFlight = useRef(false);
 
   useEffect(() => {
@@ -76,6 +82,7 @@ export function App() {
 
   const load = useCallback(
     async (force: boolean) => {
+      if (force) setTelemetryRefresh(value => value + 1);
       if (inFlight.current) return;
       inFlight.current = true;
       if (!snapshot) setLoading(true);
@@ -244,7 +251,7 @@ export function App() {
             </div>
           )}
 
-          {loading && !snapshot && (
+          {loading && !snapshot && view !== "telemetry" && (
             <>
               <div className="grid stats">
                 {Array.from({ length: 6 }).map((_, index) => (
@@ -264,6 +271,7 @@ export function App() {
           {snapshot && view === "events" && <EventsView snapshot={snapshot} />}
           {snapshot && view === "logs" && <LogsView snapshot={snapshot} />}
           {snapshot && view === "query" && <QueryView snapshot={snapshot} />}
+          {view === "telemetry" && <TelemetryView intervalSeconds={intervalSeconds} refreshTick={telemetryRefresh} />}
 
           {!loading && !snapshot && !error && <div className="empty">No snapshot available.</div>}
           <footer className="muted" style={{ fontSize: 11, lineHeight: 1.6 }}>

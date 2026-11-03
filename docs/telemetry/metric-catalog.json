@@ -1,0 +1,173 @@
+{
+  "schema_version": "1.0",
+  "notes": [
+    "Provider adapters own deployment-specific PromQL; these IDs and units describe the consumer contract.",
+    "Missing sources or optional metrics must be unavailable, not synthesized as zero."
+  ],
+  "metrics": [
+    {
+      "id": "scrape_health",
+      "unit": "boolean"
+    },
+    {
+      "id": "database_scrape_health",
+      "unit": "boolean"
+    },
+    {
+      "id": "node_cpu_percent",
+      "unit": "percent"
+    },
+    {
+      "id": "node_cpu_cores",
+      "unit": "cores"
+    },
+    {
+      "id": "node_memory_used_bytes",
+      "unit": "bytes"
+    },
+    {
+      "id": "node_memory_total_bytes",
+      "unit": "bytes"
+    },
+    {
+      "id": "pod_cpu_cores",
+      "unit": "cores"
+    },
+    {
+      "id": "pod_memory_working_set_bytes",
+      "unit": "bytes"
+    },
+    {
+      "id": "database_cpu_cores_total",
+      "unit": "cores"
+    },
+    {
+      "id": "database_memory_working_set_bytes_total",
+      "unit": "bytes"
+    },
+    {
+      "id": "pod_cpu_requested_cores",
+      "unit": "cores"
+    },
+    {
+      "id": "pod_memory_limit_bytes",
+      "unit": "bytes"
+    },
+    {
+      "id": "object_storage_logical_bytes",
+      "unit": "bytes"
+    },
+    {
+      "id": "object_storage_file_count",
+      "unit": "files"
+    },
+    {
+      "id": "object_storage_scan_age_seconds",
+      "unit": "seconds"
+    },
+    {
+      "id": "object_storage_requested_bytes",
+      "unit": "bytes"
+    },
+    {
+      "id": "shared_filesystem_used_bytes",
+      "unit": "bytes"
+    },
+    {
+      "id": "shared_filesystem_available_bytes",
+      "unit": "bytes"
+    },
+    {
+      "id": "shared_filesystem_capacity_bytes",
+      "unit": "bytes"
+    },
+    {
+      "id": "node_disk_read_bytes_per_second",
+      "unit": "bytes_per_second"
+    },
+    {
+      "id": "node_disk_written_bytes_per_second",
+      "unit": "bytes_per_second"
+    },
+    {
+      "id": "compactor_primary",
+      "unit": "boolean"
+    },
+    {
+      "id": "compactor_memory_used_bytes",
+      "unit": "bytes"
+    },
+    {
+      "id": "compactor_memory_budget_bytes",
+      "unit": "bytes"
+    },
+    {
+      "id": "compactor_slices_queued",
+      "unit": "slices"
+    },
+    {
+      "id": "compactor_plans_active",
+      "unit": "plans"
+    },
+    {
+      "id": "compactor_snapshots_pending",
+      "unit": "snapshots"
+    },
+    {
+      "id": "compactor_snapshot_lag_seconds",
+      "unit": "seconds"
+    },
+    {
+      "id": "compactor_input_bytes_per_second",
+      "unit": "bytes_per_second"
+    },
+    {
+      "id": "compactor_output_bytes_per_second",
+      "unit": "bytes_per_second"
+    },
+    {
+      "id": "compactor_output_rows_per_second",
+      "unit": "rows_per_second"
+    },
+    {
+      "id": "compactor_plans_completed_per_second",
+      "unit": "plans_per_second"
+    },
+    {
+      "id": "compactor_slice_latency_p95_seconds",
+      "unit": "seconds"
+    },
+    {
+      "id": "file_cache_bytes_by_pod",
+      "unit": "bytes"
+    },
+    {
+      "id": "monitoring_cpu_cores",
+      "unit": "cores"
+    },
+    {
+      "id": "monitoring_memory_working_set_bytes",
+      "unit": "bytes"
+    },
+    {
+      "id": "pod_cpu_throttled_period_ratio",
+      "unit": "ratio"
+    },
+    {
+      "id": "pod_restarts",
+      "unit": "restarts"
+    },
+    {
+      "id": "query_datafusion_query_execution_ooms_total",
+      "unit": "events"
+    },
+    {
+      "id": "datafusion_mem_pool_bytes",
+      "unit": "bytes"
+    },
+    {
+      "id": "execution_mem_pool_utilization_ratio",
+      "unit": "ratio"
+    }
+  ]
+}

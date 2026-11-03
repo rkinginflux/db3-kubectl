@@ -14,6 +14,7 @@ use std::{
 };
 
 mod collect;
+mod telemetry;
 mod webui;
 mod webui_process;
 

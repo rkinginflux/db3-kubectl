@@ -9,6 +9,13 @@ Nothing in this file grants rights to any third-party trademark. See
 
 ## Embedded web console
 
+The telemetry extension also embeds Apache ECharts 6.1.0 (Apache-2.0),
+zrender (BSD-3-Clause), lucide-react 0.468.0 (ISC, with Feather MIT portions),
+and tslib (0BSD). The build includes their complete installed license and
+copyright files, the ECharts NOTICE, and its d3 attribution in the same
+`db3-third-party-notices` HTML template as these notices. Exact versions are
+recorded in `webui/package-lock.json`; these libraries require no runtime CDN.
+
 The `kubectl db3 webui` frontend is compiled and inlined into the binary as a
 single HTML file. Minification removes the license banners that ship with the
 libraries, so the notices are reproduced here.
